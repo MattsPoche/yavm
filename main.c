@@ -14,6 +14,7 @@
 #include <stdbool.h>
 
 #define UNUSED(var) ((void)(var))
+#define SV_FORMAT(sv) (int)(sv).len, (sv).str
 #define STACK_SZ 1024
 #define PRG_SZ   1024
 #define DATA_SZ  (1024 * 4)
@@ -64,6 +65,12 @@ typedef struct _sv {
 	size_t len;
 	char *str;
 } StrView;
+
+
+typedef struct _tokstk {
+	size_t len;
+	StrView entries[TOKEN_STK_SZ];
+} TokenStack;
 
 typedef struct _label {
 	StrView name;
@@ -133,6 +140,7 @@ enum trapcode {
 	TRAP_INVALIDOPCODE,
 };
 
+static StrView sv_next_token(StrView sv, StrView *rest);
 void vm_init(Vm *vm);
 char *trapcode_tostr(enum trapcode code);
 char *opcode_tostr(enum opcode op);
@@ -157,12 +165,16 @@ int try_parse_float(StrView sv, StrView *sv_ret, double *ret);
 int try_parse_int(StrView sv, StrView *sv_ret, int64_t *ret);
 int try_parse_label(StrView sv, StrView *ret, StrView *label_name);
 void resolve_labels(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl);
-int assemble(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv);
+int assemble(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenStack *tokstk);
 int assemble_executable_segment(Vm *vm, LabelTbl *deftbl,
-								LabelTbl *restbl, StrView sv, StrView *ret);
+								LabelTbl *restbl, TokenStack *tokstk);
 int assemble_data_segment(Vm *vm, LabelTbl *deftbl,
-						  LabelTbl *restbl, StrView sv, StrView *ret);
-
+						  LabelTbl *restbl, TokenStack *tokstk);
+TokenStack *make_token_stack(void);
+void push_token(TokenStack *stk, StrView token);
+void populate_token_stack(TokenStack *stk, StrView sv);
+StrView pop_token(TokenStack *stk);
+StrView peek_token(TokenStack *stk);
 
 #define IS_JCC(op) ((op) >= op_jez && (op) <= op_jgez)
 #define VM_TRAP(vm_ptr, value)					\
@@ -546,6 +558,71 @@ vm_run(Vm *vm)
 	}
 }
 
+TokenStack *
+make_token_stack(void)
+{
+	TokenStack *tstck = GC_MALLOC(sizeof(*tstck));
+	tstck->len = 0;
+	return tstck;
+}
+
+void
+push_token(TokenStack *stk, StrView token)
+{
+	assert(stk->len < TOKEN_STK_SZ);
+	stk->entries[stk->len++] = token;
+}
+
+void
+populate_token_stack(TokenStack *stk, StrView sv)
+{
+	StrView token;
+	while (sv.len) {
+		token = sv_next_token(sv, &sv);
+		if (sv.len == 0) break;
+		if (sv_eq_cstr(token, "\"")) {
+			push_token(stk, token);
+			token.len = 0;
+			token.str = sv.str;
+			while (sv.len) {
+				if (*sv.str == '"') {
+					break;
+				}
+				sv.str++;
+				sv.len--;
+				token.len++;
+			}
+			push_token(stk, token);
+			token = sv_next_token(sv, &sv);
+		}
+		push_token(stk, token);
+	}
+	size_t i = 0;
+	size_t j = stk->len - 1;
+	while (i < j) {
+		token = stk->entries[i];
+		stk->entries[i] = stk->entries[j];
+		stk->entries[j] = token;
+		i++;
+		j--;
+	}
+}
+
+StrView
+pop_token(TokenStack *stk)
+{
+	assert(stk->len > 0);
+	stk->len--;
+	return stk->entries[stk->len];
+}
+
+StrView
+peek_token(TokenStack *stk)
+{
+	assert(stk->len > 0);
+	return stk->entries[stk->len - 1];
+}
+
 LabelTbl *
 make_labeltbl(void)
 {
@@ -780,21 +857,21 @@ push_inst(INST *prg, size_t idx, INST inst)
 
 #define PARSE_COMMA()							\
 	do {										\
-		token = sv_next_token(sv, &sv);			\
+		token = pop_token(tokstk);				\
 		assert(sv_eq_cstr(token, ","));			\
 	} while (0)
 
 #define PARSE_ABC(op)													\
 	do {																\
-		token = sv_next_token(sv, &sv);									\
+		token = pop_token(tokstk);										\
 		assert(sv_to_int(token, &a));									\
 		assert(a >= INT8_MIN && a <= INT8_MAX);							\
 		PARSE_COMMA();													\
-		token = sv_next_token(sv, &sv);									\
+		token = pop_token(tokstk);										\
 		assert(sv_to_int(token, &b));									\
 		assert(b >= INT8_MIN && b <= INT8_MAX);							\
 		PARSE_COMMA();													\
-		token = sv_next_token(sv, &sv);									\
+		token = pop_token(tokstk);										\
 		assert(sv_to_int(token, &c));									\
 		assert(c >= INT8_MIN && c <= INT8_MAX);							\
 		idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = (op), .a = a, .b = b, .c = c}}); \
@@ -802,11 +879,11 @@ push_inst(INST *prg, size_t idx, INST inst)
 
 #define PARSE_ABx(op)													\
 	do {																\
-		token = sv_next_token(sv, &sv);									\
+		token = pop_token(tokstk);										\
 		assert(sv_to_int(token, &a));									\
 		assert(a >= INT8_MIN && a <= INT8_MAX);							\
 		PARSE_COMMA();													\
-		token = sv_next_token(sv, &sv);									\
+		token = pop_token(tokstk);										\
 		if (sv_to_int(token, &b)) {										\
 			assert(b >= INT16_MIN && b <= INT16_MAX);					\
 		} else {														\
@@ -818,7 +895,7 @@ push_inst(INST *prg, size_t idx, INST inst)
 
 #define PARSE_Ax(op)													\
 	do {																\
-		token = sv_next_token(sv, &sv);									\
+		token = pop_token(tokstk);										\
 		if (sv_to_int(token, &a)) {										\
 			assert(a >= INT24_MIN && a <= INT24_MAX);					\
 		} else {														\
@@ -862,7 +939,7 @@ resolve_labels(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl)
 }
 
 int
-assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv, StrView *ret)
+assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenStack *tokstk)
 {
 	/* defining data:
 	 * db *bytes*
@@ -874,40 +951,40 @@ assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv, St
 	double flt;
 	StrView token;
 	UNUSED(restbl);
-	while (sv.len) {
-		token = sv_next_token(sv, &sv);
-		if (token.len == 0) break;
+	while (tokstk->len > 0) {
+		token = pop_token(tokstk);
 		if (sv_eq_cstr(token, "segment")) {
-			*ret = sv;
 			return 1;
 		} else if (sv_eq_cstr(token, "db")) {
 			for (;;) {
-				token = sv_next_token(sv, &sv);
+				token = pop_token(tokstk);
 				if (sv_eq_cstr(token, "rep")) {
-					assert(sv_to_int(sv_next_token(sv, &sv), &word));
+					assert(sv_to_int(pop_token(tokstk), &word));
 					vm->data_end += (uint64_t)word;
 					break;
-				} else if (sv_eq_cstr(token, "\"")) {
-					while (!try_parse_char('"', sv, &sv)) {
-						assert(sv.len);
-						*vm->data_end++ = *sv.str++;
-						sv.len--;
+				} if (sv_eq_cstr(token, "\"")) {
+					token = pop_token(tokstk);
+					while (token.len) {
+						*vm->data_end++ = *token.str++;
+						token.len--;
 					}
+					assert(sv_eq_cstr(pop_token(tokstk), "\""));
 				} else {
 					assert(sv_to_int(token, &word));
 					assert(word >= INT8_MIN && word <= INT8_MAX);
 					*vm->data_end++ = word;
 				}
-				sv = eat_ws_and_comments(sv);
-				if (!try_parse_char(',', sv, &sv)) {
+				if (!sv_eq_cstr(peek_token(tokstk), ",")) {
 					break;
+				} else {
+					pop_token(tokstk);
 				}
 			}
 		} else if (sv_eq_cstr(token, "df")) {
 			for (;;) {
-				token = sv_next_token(sv, &sv);
+				token = pop_token(tokstk);
 				if (sv_eq_cstr(token, "rep")) {
-					assert(sv_to_int(sv_next_token(sv, &sv), &word));
+					assert(sv_to_int(pop_token(tokstk), &word));
 					vm->data_end += (sizeof(WORD) * (uint64_t)word);
 					break;
 				} else {
@@ -915,16 +992,17 @@ assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv, St
 					*((double *)vm->data_end) = flt;
 					vm->data_end += sizeof(WORD);
 				}
-				sv = eat_ws_and_comments(sv);
-				if (!try_parse_char(',', sv, &sv)) {
+				if (!sv_eq_cstr(peek_token(tokstk), ",")) {
 					break;
+				} else {
+					pop_token(tokstk);
 				}
 			}
 		} else if (sv_eq_cstr(token, "dw")) {
 			for (;;) {
-				token = sv_next_token(sv, &sv);
+				token = pop_token(tokstk);
 				if (sv_eq_cstr(token, "rep")) {
-					assert(sv_to_int(sv_next_token(sv, &sv), &word));
+					assert(sv_to_int(pop_token(tokstk), &word));
 					vm->data_end += (sizeof(WORD) * (uint64_t)word);
 					break;
 				} else {
@@ -932,34 +1010,31 @@ assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv, St
 					*((int64_t *)vm->data_end) = word;
 					vm->data_end += sizeof(WORD);
 				}
-				sv = eat_ws_and_comments(sv);
-				if (!try_parse_char(',', sv, &sv)) {
+				if (!sv_eq_cstr(peek_token(tokstk), ",")) {
 					break;
+				} else {
+					pop_token(tokstk);
 				}
 			}
 		} else {
 			push_label(deftbl, token, (uintptr_t)(vm->data_end));
-			assert(sv_eq_cstr(sv_next_token(sv, &sv), ":"));
+			assert(sv_eq_cstr(pop_token(tokstk), ":"));
 			continue;
 		}
-		assert(sv_eq_cstr(sv_next_token(sv, &sv), ";"));
+		assert(sv_eq_cstr(pop_token(tokstk), ";"));
 	}
 	return 0;
 }
 
 int
-assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv, StrView *ret)
+assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenStack *tokstk)
 {
 	int64_t a, b, c;
 	WORD w;
 	size_t idx = 0;
 	StrView token;
-	while (sv.len) {
-		token = sv_next_token(sv, &sv);
-		if (token.len == 0) {
-			*ret = sv;
-			return 1;
-		}
+	while (tokstk->len > 0) {
+		token = pop_token(tokstk);
 		int i = 0;
 		for (; i < OP_COUNT; ++i) {
 			if (sv_eq(token, sv_from_cstr(opcode_tostr(i)))) {
@@ -975,11 +1050,11 @@ assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView 
 					PARSE_Ax(i);
 				} break;
 				case op_ldw: {
-					token = sv_next_token(sv, &sv);
+					token = pop_token(tokstk);
 					assert(sv_to_int(token, &a));
 					assert(a >= INT8_MIN && a <= INT8_MAX);
 					PARSE_COMMA();
-					token = sv_next_token(sv, &sv);
+					token = pop_token(tokstk);
 					if (sv_to_int(token, &c)) {
 						w = (WORD){.as_i64 = c};
 						idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_ldw, .a = a}});
@@ -993,11 +1068,11 @@ assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView 
 					}
 				} break;
 				case op_ldf: {
-					token = sv_next_token(sv, &sv);
+					token = pop_token(tokstk);
 					assert(sv_to_int(token, &a));
 					assert(a >= INT8_MIN && a <= INT8_MAX);
 					PARSE_COMMA();
-					token = sv_next_token(sv, &sv);
+					token = pop_token(tokstk);
 					assert(sv_to_f64(token, &w.as_f64));
 					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a}});
 					idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[0]});
@@ -1008,7 +1083,7 @@ assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView 
 				case op_lip:
 				case op_call:
 				case op_puts: {
-					token = sv_next_token(sv, &sv);
+					token = pop_token(tokstk);
 					assert(sv_to_int(token, &a));
 					assert(a >= INT8_MIN && a <= INT8_MAX);
 					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a}});
@@ -1018,11 +1093,11 @@ assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView 
 					idx = push_inst(vm->exe, idx, (INST)INST_iAx(i, 0));
 				} break;
 				case op_mov: {
-					token = sv_next_token(sv, &sv);
+					token = pop_token(tokstk);
 					assert(sv_to_int(token, &a));
 					assert(a >= INT8_MIN && a <= INT8_MAX);
 					PARSE_COMMA();
-					token = sv_next_token(sv, &sv);
+					token = pop_token(tokstk);
 					assert(sv_to_int(token, &b));
 					assert(b >= INT8_MIN && b <= INT8_MAX);
 					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a, .b = b}});
@@ -1059,7 +1134,7 @@ assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView 
 					PARSE_ABx(i);
 				} break;
 				case op_call0: {
-					token = sv_next_token(sv, &sv);
+					token = pop_token(tokstk);
 					if (sv_to_int(token, &c)) {
 						w = (WORD){.as_i64 = c};
 						idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i}});
@@ -1083,46 +1158,45 @@ assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView 
 		}
 		if (i == OP_COUNT) {
 			if (sv_eq_cstr(token, "segment")) {
+				return 1;
 			} else if (sv_eq_cstr(token, "entry")) {
-				token = sv_next_token(sv, &sv);
+				token = pop_token(tokstk);
 				push_label(restbl, token, 0);
 			} else {
 				push_label(deftbl, token, (uintptr_t)(&vm->exe[idx]));
 				printf("%.*s\n", (int)token.len, token.str);
-				assert(sv_eq_cstr(sv_next_token(sv, &sv), ":"));
+				assert(sv_eq_cstr(pop_token(tokstk), ":"));
 			}
 		}
-		assert(sv_eq_cstr(sv_next_token(sv, &sv), ";"));
+		assert(sv_eq_cstr(pop_token(tokstk), ";"));
 	}
-	*ret = sv;
 	return 0;
 }
 
 int
-assemble(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv)
+assemble(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenStack *tokstk)
 {
 	int ds = 0, es = 0;
 	StrView token;
-	assert(sv_eq_cstr(sv_next_token(sv, &sv), "segment"));
-	while (sv.len) {
-		token = sv_next_token(sv, &sv);
-		if (token.len == 0) break;
+	assert(sv_eq_cstr(pop_token(tokstk), "segment"));
+	while (tokstk->len > 0) {
+		token = pop_token(tokstk);
 		if (sv_eq_cstr(token, "executable")) {
-			assert(sv_eq_cstr(sv_next_token(sv, &sv), ":"));
+			assert(sv_eq_cstr(pop_token(tokstk), ":"));
 			assert(es == 0);
 			es = 1;
-			if (assemble_executable_segment(vm, deftbl, restbl, sv, &sv)) {
+			if (assemble_executable_segment(vm, deftbl, restbl, tokstk)) {
 				continue;
 			} else {
 				break;
 			}
 		} else if (sv_eq_cstr(token, "data")) {
-			assert(sv_eq_cstr(sv_next_token(sv, &sv), ":"));
+			assert(sv_eq_cstr(pop_token(tokstk), ":"));
 			assert(ds == 0);
 			ds = 1;
 			vm->data = GC_MALLOC(DATA_SZ);
 			vm->data_end = vm->data;
-			if (assemble_data_segment(vm, deftbl, restbl, sv, &sv)) {
+			if (assemble_data_segment(vm, deftbl, restbl, tokstk)) {
 				continue;
 			} else {
 				break;
@@ -1160,7 +1234,9 @@ main(void)
 	LabelTbl *deftbl = make_labeltbl();
 	LabelTbl *restbl = make_labeltbl();
 	StrView sv_asm = sv_map_file("test.yasm");
-	assemble(&vm, deftbl, restbl, sv_asm);
+	TokenStack *tokstk = make_token_stack();
+	populate_token_stack(tokstk, sv_asm);
+	assemble(&vm, deftbl, restbl, tokstk);
 	if (vm_run(&vm) < 0) {
 		fprintf(stderr, "Error trap signalled: %s\n", trapcode_tostr(vm.status));
 	}
