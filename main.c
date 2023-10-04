@@ -17,6 +17,7 @@
 #define STACK_SZ 1024
 #define PRG_SZ   1024
 #define DATA_SZ  (1024 * 4)
+#define TOKEN_STK_SZ (1024 * 2)
 #define STACK_END_PTR(stack) ((stack) + STACK_SZ)
 #define INST_iAx(op, ax) {.as_u32 = ((ax) << 8)|(op)}
 #define INT24_MAX (1L << 23)
@@ -141,6 +142,9 @@ uint64_t hash(void *buff, size_t size);
 StrView sv_map_file(char *filepath);
 StrView sv_from_cstr(char *str);
 int sv_eq(StrView s1, StrView s2);
+int sv_eq_cstr(StrView sv, char *cstr);
+int sv_to_int(StrView sv, int64_t *ret);
+int sv_to_f64(StrView sv, double *ret);
 StrView sv_trim_ws(StrView sv);
 LabelTbl *make_labeltbl(void);
 void push_label(LabelTbl *tbl, StrView name, uintptr_t addr);
@@ -590,7 +594,6 @@ sv_from_cstr(char *str)
 	};
 }
 
-
 StrView
 sv_map_file(char *filepath)
 {
@@ -623,6 +626,12 @@ sv_eq(StrView s1, StrView s2)
 }
 
 int
+sv_eq_cstr(StrView sv, char *cstr)
+{
+	return sv_eq(sv, sv_from_cstr(cstr));
+}
+
+int
 chin(int ch, char *cstr)
 {
 	for (; *cstr != '\0'; cstr++) {
@@ -640,20 +649,34 @@ islabelchar(int ch)
 		&& !chin(ch, "+-*&^#!,/\"'[]{}()|=:;`~");
 }
 
+int
+sv_to_int(StrView sv, int64_t *ret)
+{
+	char *endptr;
+	int64_t n = strtol(sv.str, &endptr, 10);
+	if (sv.str + sv.len == endptr) {
+		*ret = n;
+		return 1;
+	}
+	return 0;
+}
+
+int
+sv_to_f64(StrView sv, double *ret)
+{
+	char *endptr;
+	double n = strtod(sv.str, &endptr);
+	if (sv.str + sv.len == endptr) {
+		*ret = n;
+		return 1;
+	}
+	return 0;
+}
+
 static int
 isdelim(int ch)
 {
 	return isspace(ch) || chin(ch, "+-*&^#!,/\"'[]{}()|=:;`~");
-}
-
-StrView
-sv_trim_ws(StrView sv)
-{
-	while (sv.len && isspace(*sv.str)) {
-		sv.str++;
-		sv.len--;
-	}
-	return sv;
 }
 
 static StrView
@@ -666,6 +689,53 @@ eat_ws_and_comments(StrView sv)
 			sv.len--;
 		}
 		return sv_trim_ws(sv);
+	}
+	return sv;
+}
+
+
+static StrView
+sv_chop_by_delim(StrView sv, StrView *rest)
+{
+	StrView token = {
+		.len = 0,
+		.str = sv.str,
+	};
+	while (sv.len && !isdelim(*sv.str)) {
+		sv.len--;
+		sv.str++;
+		token.len++;
+	}
+	*rest = sv;
+	return token;
+}
+
+static StrView
+sv_next_token(StrView sv, StrView *rest)
+{
+	sv = eat_ws_and_comments(sv);
+	StrView token = {
+		.len = 0,
+		.str = sv.str,
+	};
+	if (sv.len && isdelim(*sv.str)) {
+		sv.len--;
+		sv.str++;
+		token.len++;
+		*rest = sv;
+		return token;
+	}
+	token = sv_chop_by_delim(sv, &sv);
+	*rest = sv;
+	return token;
+}
+
+StrView
+sv_trim_ws(StrView sv)
+{
+	while (sv.len && isspace(*sv.str)) {
+		sv.str++;
+		sv.len--;
 	}
 	return sv;
 }
@@ -700,89 +770,6 @@ try_parse_str(char *cstr, StrView sv, StrView *ret)
 	return 0;
 }
 
-int
-try_parse_float(StrView sv, StrView *sv_ret, double *ret)
-{
-	StrView sv_float = {
-		.len = 0,
-		.str = sv.str,
-	};
-	if (sv.len && (isdigit(*sv.str) || *sv.str == '-')) {
-		sv.len--;
-		sv.str++;
-		sv_float.len++;
-	} else {
-		return 0;
-	}
-	while (sv.len && isdigit(*sv.str)) {
-		sv.len--;
-		sv.str++;
-		sv_float.len++;
-	}
-	if (sv.len && try_parse_char('.', sv, &sv)) {
-		while (sv.len && isdigit(*sv.str)) {
-			sv.len--;
-			sv.str++;
-			sv_float.len++;
-		}
-	} else {
-		return 0;
-	}
-	if (sv.len == 0 || !isdelim(*sv.str)) {
-		return 0;
-	}
-	*ret = strtod(sv_float.str, NULL);
-	*sv_ret = sv;
-	return 1;
-}
-
-int
-try_parse_int(StrView sv, StrView *sv_ret, int64_t *ret)
-{
-	StrView sv_int = {
-		.len = 0,
-		.str = sv.str,
-	};
-	if (sv.len && (isdigit(*sv.str) || *sv.str == '-')) {
-		sv.len--;
-		sv.str++;
-		sv_int.len++;
-	} else {
-		return 0;
-	}
-	while (sv.len && isdigit(*sv.str)) {
-		sv.len--;
-		sv.str++;
-		sv_int.len++;
-	}
-	if (sv.len == 0 || !isdelim(*sv.str)) {
-		return 0;
-	}
-	*ret = strtol(sv_int.str, NULL, 10);
-	*sv_ret = sv;
-	return 1;
-}
-
-int
-try_parse_label(StrView sv, StrView *ret, StrView *label_name)
-{
-	StrView name = {
-		.len = 0,
-		.str = sv.str,
-	};
-	if (sv.len && isdigit(*sv.str)) {
-		return 0;
-	}
-	while (sv.len && islabelchar(*sv.str)) {
-		sv.len--;
-		sv.str++;
-		name.len++;
-	}
-	*ret = sv;
-	*label_name = name;
-	return 1;
-}
-
 static size_t
 push_inst(INST *prg, size_t idx, INST inst)
 {
@@ -793,36 +780,37 @@ push_inst(INST *prg, size_t idx, INST inst)
 
 #define PARSE_COMMA()							\
 	do {										\
-		sv = eat_ws_and_comments(sv);			\
-		assert(try_parse_char(',', sv, &sv));	\
-		sv = eat_ws_and_comments(sv);			\
+		token = sv_next_token(sv, &sv);			\
+		assert(sv_eq_cstr(token, ","));			\
 	} while (0)
 
 #define PARSE_ABC(op)													\
 	do {																\
-		sv = eat_ws_and_comments(sv);									\
-		assert(try_parse_int(sv, &sv, &a));								\
+		token = sv_next_token(sv, &sv);									\
+		assert(sv_to_int(token, &a));									\
 		assert(a >= INT8_MIN && a <= INT8_MAX);							\
 		PARSE_COMMA();													\
-		assert(try_parse_int(sv, &sv, &b));								\
+		token = sv_next_token(sv, &sv);									\
+		assert(sv_to_int(token, &b));									\
 		assert(b >= INT8_MIN && b <= INT8_MAX);							\
 		PARSE_COMMA();													\
-		assert(try_parse_int(sv, &sv, &c));								\
+		token = sv_next_token(sv, &sv);									\
+		assert(sv_to_int(token, &c));									\
 		assert(c >= INT8_MIN && c <= INT8_MAX);							\
 		idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = (op), .a = a, .b = b, .c = c}}); \
 	} while (0)
 
 #define PARSE_ABx(op)													\
 	do {																\
-		sv = eat_ws_and_comments(sv);									\
-		assert(try_parse_int(sv, &sv, &a));								\
+		token = sv_next_token(sv, &sv);									\
+		assert(sv_to_int(token, &a));									\
 		assert(a >= INT8_MIN && a <= INT8_MAX);							\
 		PARSE_COMMA();													\
-		if (try_parse_int(sv, &sv, &b)) {								\
+		token = sv_next_token(sv, &sv);									\
+		if (sv_to_int(token, &b)) {										\
 			assert(b >= INT16_MIN && b <= INT16_MAX);					\
 		} else {														\
-			assert(try_parse_label(sv, &sv, &label_name));				\
-			push_label(restbl, label_name, (uintptr_t)(&vm->exe[idx]));	\
+			push_label(restbl, token, (uintptr_t)(&vm->exe[idx]));		\
 			b = 0;														\
 		}																\
 		idx = push_inst(vm->exe, idx, (INST){.iABx = {.i = (op), .a = a, .bx = b}}); \
@@ -830,12 +818,11 @@ push_inst(INST *prg, size_t idx, INST inst)
 
 #define PARSE_Ax(op)													\
 	do {																\
-		sv = eat_ws_and_comments(sv);									\
-		if (try_parse_int(sv, &sv, &a)) {								\
+		token = sv_next_token(sv, &sv);									\
+		if (sv_to_int(token, &a)) {										\
 			assert(a >= INT24_MIN && a <= INT24_MAX);					\
 		} else {														\
-			assert(try_parse_label(sv, &sv, &label_name));				\
-			push_label(restbl, label_name, (uintptr_t)(&vm->exe[idx]));	\
+			push_label(restbl, token, (uintptr_t)(&vm->exe[idx]));		\
 			a = 0;														\
 		}																\
 		idx = push_inst(vm->exe, idx, (INST)INST_iAx((op), a));			\
@@ -885,30 +872,29 @@ assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv, St
 	 */
 	int64_t word;
 	double flt;
-	StrView label_name;
+	StrView token;
 	UNUSED(restbl);
 	while (sv.len) {
-		sv = eat_ws_and_comments(sv);
-		if (sv.len == 0) break;
-		if (try_parse_str("segment", sv, &sv)) {
+		token = sv_next_token(sv, &sv);
+		if (token.len == 0) break;
+		if (sv_eq_cstr(token, "segment")) {
 			*ret = sv;
 			return 1;
-		} else if (try_parse_str("db", sv, &sv)) {
+		} else if (sv_eq_cstr(token, "db")) {
 			for (;;) {
-				sv = eat_ws_and_comments(sv);
-				if (try_parse_str("rep", sv, &sv)) {
-					sv = eat_ws_and_comments(sv);
-					assert(try_parse_int(sv, &sv, &word));
+				token = sv_next_token(sv, &sv);
+				if (sv_eq_cstr(token, "rep")) {
+					assert(sv_to_int(sv_next_token(sv, &sv), &word));
 					vm->data_end += (uint64_t)word;
 					break;
-				} else if (try_parse_char('"', sv, &sv)) {
+				} else if (sv_eq_cstr(token, "\"")) {
 					while (!try_parse_char('"', sv, &sv)) {
 						assert(sv.len);
 						*vm->data_end++ = *sv.str++;
 						sv.len--;
 					}
 				} else {
-					assert(try_parse_int(sv, &sv, &word));
+					assert(sv_to_int(token, &word));
 					assert(word >= INT8_MIN && word <= INT8_MAX);
 					*vm->data_end++ = word;
 				}
@@ -917,15 +903,15 @@ assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv, St
 					break;
 				}
 			}
-		} else if (try_parse_str("df", sv, &sv)) {
+		} else if (sv_eq_cstr(token, "df")) {
 			for (;;) {
-				sv = eat_ws_and_comments(sv);
-				if (try_parse_str("rep", sv, &sv)) {
-					assert(try_parse_int(sv, &sv, &word));
+				token = sv_next_token(sv, &sv);
+				if (sv_eq_cstr(token, "rep")) {
+					assert(sv_to_int(sv_next_token(sv, &sv), &word));
 					vm->data_end += (sizeof(WORD) * (uint64_t)word);
 					break;
 				} else {
-					assert(try_parse_float(sv, &sv, &flt));
+					assert(sv_to_f64(token, &flt));
 					*((double *)vm->data_end) = flt;
 					vm->data_end += sizeof(WORD);
 				}
@@ -934,15 +920,15 @@ assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv, St
 					break;
 				}
 			}
-		} else if (try_parse_str("dw", sv, &sv)) {
+		} else if (sv_eq_cstr(token, "dw")) {
 			for (;;) {
-				sv = eat_ws_and_comments(sv);
-				if (try_parse_str("rep", sv, &sv)) {
-					assert(try_parse_int(sv, &sv, &word));
+				token = sv_next_token(sv, &sv);
+				if (sv_eq_cstr(token, "rep")) {
+					assert(sv_to_int(sv_next_token(sv, &sv), &word));
 					vm->data_end += (sizeof(WORD) * (uint64_t)word);
 					break;
 				} else {
-					assert(try_parse_int(sv, &sv, &word));
+					assert(sv_to_int(token, &word));
 					*((int64_t *)vm->data_end) = word;
 					vm->data_end += sizeof(WORD);
 				}
@@ -951,16 +937,12 @@ assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv, St
 					break;
 				}
 			}
-		} else if (try_parse_label(sv, &sv, &label_name)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_char(':', sv, &sv));
-			push_label(deftbl, label_name, (uintptr_t)(vm->data_end));
+		} else {
+			push_label(deftbl, token, (uintptr_t)(vm->data_end));
+			assert(sv_eq_cstr(sv_next_token(sv, &sv), ":"));
 			continue;
 		}
-		sv = eat_ws_and_comments(sv);
-		if (!try_parse_char(';', sv, &sv)) {
-			assert(!"Error expected simicolon");
-		}
+		assert(sv_eq_cstr(sv_next_token(sv, &sv), ";"));
 	}
 	return 0;
 }
@@ -970,173 +952,147 @@ assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView 
 {
 	int64_t a, b, c;
 	WORD w;
-	StrView label_name;
 	size_t idx = 0;
+	StrView token;
 	while (sv.len) {
-		sv = eat_ws_and_comments(sv);
-		if (sv.len == 0) break;
-		if (try_parse_str("segment", sv, &sv)) {
+		token = sv_next_token(sv, &sv);
+		if (token.len == 0) {
 			*ret = sv;
 			return 1;
-		} else if (try_parse_str("nop", sv, &sv)) {
-			idx = push_inst(vm->exe, idx, (INST)INST_iAx(op_nop, 0));
-		} else if (try_parse_str("halt", sv, &sv)) {
-			PARSE_Ax(op_halt);
-		} else if (try_parse_str("ldi", sv, &sv)) {
-			PARSE_ABx(op_ldi);
-		} else if (try_parse_str("ldw", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_int(sv, &sv, &a));
-			assert(a >= INT8_MIN && a <= INT8_MAX);
-			PARSE_COMMA();
-			if (try_parse_int(sv, &sv, &c)) {
-				w = (WORD){.as_i64 = c};
-				idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_ldw, .a = a}});
-				idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[0]});
-				idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[1]});
-			} else {
-				assert(try_parse_label(sv, &sv, &label_name));
-				push_label(restbl, label_name, (uintptr_t)(&vm->exe[idx]));
-				idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_ldw, .a = a}});
-				idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
-				idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
-			}
-		} else if (try_parse_str("ldf", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_int(sv, &sv, &a));
-			assert(a >= INT8_MIN && a <= INT8_MAX);
-			PARSE_COMMA();
-			assert(try_parse_float(sv, &sv, &w.as_f64));
-			idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_ldf, .a = a}});
-			idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[0]});
-			idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[1]});
-		} else if (try_parse_str("lfp", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_int(sv, &sv, &a));
-			assert(a >= INT8_MIN && a <= INT8_MAX);
-			idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_lfp, .a = a}});
-		} else if (try_parse_str("lsp", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_int(sv, &sv, &a));
-			assert(a >= INT8_MIN && a <= INT8_MAX);
-			idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_lsp, .a = a}});
-		} else if (try_parse_str("lip", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_int(sv, &sv, &a));
-			assert(a >= INT8_MIN && a <= INT8_MAX);
-			idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_lip, .a = a}});
-		} else if (try_parse_str("alloca", sv, &sv)) {
-			PARSE_Ax(op_alloca);
-		} else if (try_parse_str("enter", sv, &sv)) {
-			idx = push_inst(vm->exe, idx, (INST)INST_iAx(op_enter, 0));
-		} else if (try_parse_str("leave", sv, &sv)) {
-			idx = push_inst(vm->exe, idx, (INST)INST_iAx(op_leave, 0));
-		} else if (try_parse_str("mov", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_int(sv, &sv, &a));
-			assert(a >= INT8_MIN && a <= INT8_MAX);
-			PARSE_COMMA();
-			assert(try_parse_int(sv, &sv, &b));
-			assert(b >= INT8_MIN && b <= INT8_MAX);
-			idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_mov, .a = a, .b = b}});
-		} else if (try_parse_str("fetch", sv, &sv)) {
-			PARSE_ABC(op_fetch);
-		} else if (try_parse_str("store", sv, &sv)) {
-			PARSE_ABC(op_store);
-		} else if (try_parse_str("fetchb", sv, &sv)) {
-			PARSE_ABC(op_fetchb);
-		} else if (try_parse_str("storeb", sv, &sv)) {
-			PARSE_ABC(op_storeb);
-		} else if (try_parse_str("puts", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_int(sv, &sv, &a));
-			assert(a >= INT8_MIN && a <= INT8_MAX);
-			idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_puts, .a = a}});
-		} else if (try_parse_str("addp", sv, &sv)) {
-			PARSE_ABC(op_addp);
-		} else if (try_parse_str("subp", sv, &sv)) {
-			PARSE_ABC(op_subp);
-		} else if (try_parse_str("and", sv, &sv)) {
-			PARSE_ABC(op_and);
-		} else if (try_parse_str("or", sv, &sv)) {
-			PARSE_ABC(op_or);
-		} else if (try_parse_str("xor", sv, &sv)) {
-			PARSE_ABC(op_xor);
-		} else if (try_parse_str("shl", sv, &sv)) {
-			PARSE_ABC(op_shl);
-		} else if (try_parse_str("shr", sv, &sv)) {
-			PARSE_ABC(op_shr);
-		} else if (try_parse_str("addi", sv, &sv)) {
-			PARSE_ABC(op_addi);
-		} else if (try_parse_str("subi", sv, &sv)) {
-			PARSE_ABC(op_subi);
-		} else if (try_parse_str("muli", sv, &sv)) {
-			PARSE_ABC(op_muli);
-		} else if (try_parse_str("divi", sv, &sv)) {
-			PARSE_ABC(op_divi);
-		} else if (try_parse_str("mod", sv, &sv)) {
-			PARSE_ABC(op_mod);
-		} else if (try_parse_str("addf", sv, &sv)) {
-			PARSE_ABC(op_addf);
-		} else if (try_parse_str("subf", sv, &sv)) {
-			PARSE_ABC(op_subf);
-		} else if (try_parse_str("mulf", sv, &sv)) {
-			PARSE_ABC(op_mulf);
-		} else if (try_parse_str("divf", sv, &sv)) {
-			PARSE_ABC(op_divf);
-		} else if (try_parse_str("eq", sv, &sv)) {
-			PARSE_ABC(op_eq);
-		} else if (try_parse_str("jmp", sv, &sv)) {
-			PARSE_Ax(op_jmp);
-		} else if (try_parse_str("jez", sv, &sv)) {
-			PARSE_ABx(op_jez);
-		} else if (try_parse_str("jnz", sv, &sv)) {
-			PARSE_ABx(op_jnz);
-		} else if (try_parse_str("jlz", sv, &sv)) {
-			PARSE_ABx(op_jlz);
-		} else if (try_parse_str("jlez", sv, &sv)) {
-			PARSE_ABx(op_jlez);
-		} else if (try_parse_str("jgz", sv, &sv)) {
-			PARSE_ABx(op_jgz);
-		} else if (try_parse_str("jgez", sv, &sv)) {
-			PARSE_ABx(op_jgez);
-		} else if (try_parse_str("call", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_int(sv, &sv, &a));
-			assert(a >= INT8_MIN && a <= INT8_MAX);
-			idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_call, .a = a}});
-		} else if (try_parse_str("call0", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			if (try_parse_int(sv, &sv, &c)) {
-				w = (WORD){.as_i64 = c};
-				idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_call0}});
-				idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[0]});
-				idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[1]});
-			} else {
-				assert(try_parse_label(sv, &sv, &label_name));
-				push_label(restbl, label_name, (uintptr_t)(&vm->exe[idx]));
-				idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_call0}});
-				idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
-				idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
-			}
-		} else if (try_parse_str("ret", sv, &sv)) {
-			idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_ret}});
-		} else if (try_parse_str("entry", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_label(sv, &sv, &label_name));
-			push_label(restbl, label_name, 0);
-		} else if (try_parse_label(sv, &sv, &label_name)) {
-			sv = eat_ws_and_comments(sv);
-			printf("label_name = %.*s\n", (int)label_name.len, label_name.str);
-			printf("rest = %.*s\n", (int)sv.len, sv.str);
-			assert(try_parse_char(':', sv, &sv));
-			push_label(deftbl, label_name, (uintptr_t)(&vm->exe[idx]));
-			continue;
 		}
-		sv = eat_ws_and_comments(sv);
-		if (!try_parse_char(';', sv, &sv)) {
-			assert(!"Error expected simicolon");
+		int i = 0;
+		for (; i < OP_COUNT; ++i) {
+			if (sv_eq(token, sv_from_cstr(opcode_tostr(i)))) {
+				switch ((enum opcode)i) {
+				case op_nop: {
+					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i}});
+				} break;
+				case op_halt:
+				case op_ldi:
+				case op_alloca:
+				case op_malloc:
+				case op_jmp: {
+					PARSE_Ax(i);
+				} break;
+				case op_ldw: {
+					token = sv_next_token(sv, &sv);
+					assert(sv_to_int(token, &a));
+					assert(a >= INT8_MIN && a <= INT8_MAX);
+					PARSE_COMMA();
+					token = sv_next_token(sv, &sv);
+					if (sv_to_int(token, &c)) {
+						w = (WORD){.as_i64 = c};
+						idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_ldw, .a = a}});
+						idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[0]});
+						idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[1]});
+					} else {
+						push_label(restbl, token, (uintptr_t)(&vm->exe[idx]));
+						idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a}});
+						idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
+						idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
+					}
+				} break;
+				case op_ldf: {
+					token = sv_next_token(sv, &sv);
+					assert(sv_to_int(token, &a));
+					assert(a >= INT8_MIN && a <= INT8_MAX);
+					PARSE_COMMA();
+					token = sv_next_token(sv, &sv);
+					assert(sv_to_f64(token, &w.as_f64));
+					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a}});
+					idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[0]});
+					idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[1]});
+				} break;
+				case op_lfp:
+				case op_lsp:
+				case op_lip:
+				case op_call:
+				case op_puts: {
+					token = sv_next_token(sv, &sv);
+					assert(sv_to_int(token, &a));
+					assert(a >= INT8_MIN && a <= INT8_MAX);
+					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a}});
+				} break;
+				case op_enter:
+				case op_leave: {
+					idx = push_inst(vm->exe, idx, (INST)INST_iAx(i, 0));
+				} break;
+				case op_mov: {
+					token = sv_next_token(sv, &sv);
+					assert(sv_to_int(token, &a));
+					assert(a >= INT8_MIN && a <= INT8_MAX);
+					PARSE_COMMA();
+					token = sv_next_token(sv, &sv);
+					assert(sv_to_int(token, &b));
+					assert(b >= INT8_MIN && b <= INT8_MAX);
+					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a, .b = b}});
+				} break;
+				case op_fetch:
+				case op_store:
+				case op_fetchb:
+				case op_storeb:
+				case op_addp:
+				case op_subp:
+				case op_and:
+				case op_or:
+				case op_xor:
+				case op_shl:
+				case op_shr:
+				case op_addi:
+				case op_subi:
+				case op_muli:
+				case op_divi:
+				case op_mod:
+				case op_addf:
+				case op_subf:
+				case op_mulf:
+				case op_divf:
+				case op_eq: {
+					PARSE_ABC(i);
+				} break;
+				case op_jez:
+				case op_jnz:
+				case op_jlz:
+				case op_jlez:
+				case op_jgz:
+				case op_jgez: {
+					PARSE_ABx(i);
+				} break;
+				case op_call0: {
+					token = sv_next_token(sv, &sv);
+					if (sv_to_int(token, &c)) {
+						w = (WORD){.as_i64 = c};
+						idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i}});
+						idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[0]});
+						idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[1]});
+					} else {
+						push_label(restbl, token, (uintptr_t)(&vm->exe[idx]));
+						idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i}});
+						idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
+						idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
+					}
+				} break;
+				case op_ret: {
+					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i}});
+				} break;
+				case OP_COUNT:
+				default: assert(!"Invalid instruction");
+				}
+				break;
+			}
 		}
+		if (i == OP_COUNT) {
+			if (sv_eq_cstr(token, "segment")) {
+			} else if (sv_eq_cstr(token, "entry")) {
+				token = sv_next_token(sv, &sv);
+				push_label(restbl, token, 0);
+			} else {
+				push_label(deftbl, token, (uintptr_t)(&vm->exe[idx]));
+				printf("%.*s\n", (int)token.len, token.str);
+				assert(sv_eq_cstr(sv_next_token(sv, &sv), ":"));
+			}
+		}
+		assert(sv_eq_cstr(sv_next_token(sv, &sv), ";"));
 	}
 	*ret = sv;
 	return 0;
@@ -1146,14 +1102,13 @@ int
 assemble(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv)
 {
 	int ds = 0, es = 0;
-	sv = eat_ws_and_comments(sv);
-	assert(try_parse_str("segment", sv, &sv));
+	StrView token;
+	assert(sv_eq_cstr(sv_next_token(sv, &sv), "segment"));
 	while (sv.len) {
-		sv = eat_ws_and_comments(sv);
-		if (sv.len == 0) break;
-		if (try_parse_str("executable", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_char(':', sv, &sv));
+		token = sv_next_token(sv, &sv);
+		if (token.len == 0) break;
+		if (sv_eq_cstr(token, "executable")) {
+			assert(sv_eq_cstr(sv_next_token(sv, &sv), ":"));
 			assert(es == 0);
 			es = 1;
 			if (assemble_executable_segment(vm, deftbl, restbl, sv, &sv)) {
@@ -1161,9 +1116,8 @@ assemble(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, StrView sv)
 			} else {
 				break;
 			}
-		} else if (try_parse_str("data", sv, &sv)) {
-			sv = eat_ws_and_comments(sv);
-			assert(try_parse_char(':', sv, &sv));
+		} else if (sv_eq_cstr(token, "data")) {
+			assert(sv_eq_cstr(sv_next_token(sv, &sv), ":"));
 			assert(ds == 0);
 			ds = 1;
 			vm->data = GC_MALLOC(DATA_SZ);
