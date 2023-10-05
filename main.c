@@ -9,9 +9,7 @@
 #include <gc.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
-#include <stdbool.h>
 
 #define UNUSED(var) ((void)(var))
 #define SV_FORMAT(sv) (int)(sv).len, (sv).str
@@ -49,23 +47,10 @@ typedef union _inst {
 	} iABx;
 } INST;
 
-typedef struct _vm {
-	WORD *fp;
-	WORD *sp;
-	INST *ip;
-	jmp_buf trp;
-	int status;
-	WORD *stack;
-	INST *exe;
-	uint8_t *data;
-	uint8_t *data_end;
-} Vm;
-
 typedef struct _sv {
 	size_t len;
 	char *str;
 } StrView;
-
 
 typedef struct _tokstk {
 	size_t len;
@@ -74,7 +59,7 @@ typedef struct _tokstk {
 
 typedef struct _label {
 	StrView name;
-	uintptr_t addr;
+	uint64_t value;
 } Label;
 
 #define LABELTBL_SZ 1024
@@ -84,9 +69,27 @@ typedef struct _labeltbl {
 	Label entries[LABELTBL_SZ];
 } LabelTbl;
 
+typedef struct _vm {
+	WORD *fp;
+	WORD *sp;
+	INST *ip;
+	jmp_buf trp;
+	int status;
+	WORD *stack;
+	INST *exe;
+	INST *exe_end;
+	uint8_t *data;
+	uint8_t *data_end;
+	TokenStack *tokstk;
+	LabelTbl *deftbl;
+	LabelTbl *restbl;
+	LabelTbl *constants;
+} Vm;
+
 enum opcode {
 	op_nop = 0,
 	op_halt,
+	op_break,     /* break on next instruction and start debugging */
 	op_ldi,       /* iABx fp[A] := Bx */
 	op_ldw,       /* iABC-f64  fp[A] := immi64 */
 	op_ldf,       /* iABC-f64  fp[A] := immf64 */
@@ -103,6 +106,7 @@ enum opcode {
 	op_fetchb,
 	op_storeb,
 	op_puts,      /* iABC puts((addr)fp[A]) */
+	op_preg,
 	op_addp,      /* iABC fp[A] := (WORD *)fp[B] + fp[C] */
 	op_subp,      /* iABC fp[A] := (WORD *)fp[B] - fp[C] */
 	op_and,       /* iABC fp[A] := fp[B] & fp[C] */
@@ -110,6 +114,8 @@ enum opcode {
 	op_xor,       /* iABC fp[A] := fp[B] ^ fp[C] */
 	op_shl,       /* iABC fp[A] := fp[B] << fp[C] */
 	op_shr,       /* iABC fp[A] := fp[B] >> fp[C] */
+	op_inc,       /* iABC fp[A] := fp[B] + C */
+	op_dec,       /* iABC fp[A] := fp[B] - C */
 	op_addi,      /* iABC fp[A] := fp[B] + fp[C] */
 	op_subi,      /* iABC fp[A] := fp[B] - fp[C] */
 	op_muli,      /* iABC fp[A] := fp[B] * fp[C] */
@@ -138,38 +144,42 @@ enum trapcode {
 	TRAP_STACKOVERFLOW,
 	TRAP_STACKUNDERFLOW,
 	TRAP_INVALIDOPCODE,
+	TRAP_USERINTERUPT,
 };
 
 static StrView sv_next_token(StrView sv, StrView *rest);
 void vm_init(Vm *vm);
+char *instruction_tostr(INST *inst, INST **next_inst);
 char *trapcode_tostr(enum trapcode code);
 char *opcode_tostr(enum opcode op);
-int vm_run(Vm *vm);
+int vm_debug(Vm *vm);
+int vm_run(Vm *vm, int step_debug);
 void vm_dump_stack(Vm *vm);
 uint64_t hash(void *buff, size_t size);
-StrView sv_map_file(char *filepath);
+StrView sv_slurp_file(char *filepath);
 StrView sv_from_cstr(char *str);
+char *sv_to_cstr(StrView sv);
 int sv_eq(StrView s1, StrView s2);
 int sv_eq_cstr(StrView sv, char *cstr);
 int sv_to_int(StrView sv, int64_t *ret);
 int sv_to_f64(StrView sv, double *ret);
 StrView sv_trim_ws(StrView sv);
+StrView sv_strip_ws(StrView sv);
 LabelTbl *make_labeltbl(void);
 void push_label(LabelTbl *tbl, StrView name, uintptr_t addr);
-uintptr_t lookup_label(LabelTbl *tbl, StrView name);
+int lookup_label(LabelTbl *tbl, StrView name, uint64_t *ret);
 int chin(int ch, char *cstr);
 int islabelchar(int ch);
 int try_parse_char(int ch, StrView sv, StrView *ret);
 int try_parse_str(char *cstr, StrView sv, StrView *ret);
-int try_parse_float(StrView sv, StrView *sv_ret, double *ret);
-int try_parse_int(StrView sv, StrView *sv_ret, int64_t *ret);
-int try_parse_label(StrView sv, StrView *ret, StrView *label_name);
+int try_parse_float(TokenStack *tokstk, double *ret);
+int try_parse_int(TokenStack *tokstk, int64_t *ret);
 void resolve_labels(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl);
-int assemble(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenStack *tokstk);
-int assemble_executable_segment(Vm *vm, LabelTbl *deftbl,
-								LabelTbl *restbl, TokenStack *tokstk);
-int assemble_data_segment(Vm *vm, LabelTbl *deftbl,
-						  LabelTbl *restbl, TokenStack *tokstk);
+int invoke_macro(Vm *vm);
+int assemble(Vm *vm);
+int assemble_executable_section(Vm *vm);
+int assemble_data_section(Vm *vm);
+void disassemble(Vm *vm);
 TokenStack *make_token_stack(void);
 void push_token(TokenStack *stk, StrView token);
 void populate_token_stack(TokenStack *stk, StrView sv);
@@ -184,13 +194,127 @@ StrView peek_token(TokenStack *stk);
 	} while (0)
 
 char *
+instruction_tostr(INST *inst, INST **next_inst)
+{
+	static char buff[255];
+	enum opcode op = inst->iABC.i;
+	switch (op) {
+	case op_nop:
+	case op_break:
+	case op_ret:
+	case op_enter:
+	case op_leave: {
+		snprintf(buff, sizeof(buff), "%s;", opcode_tostr(op));
+		inst++;
+	} break;
+	case op_halt:
+	case op_alloca:
+	case op_malloc:
+	case op_jmp: {
+		int32_t ax = inst->as_i32 >> 8;
+		snprintf(buff, sizeof(buff),
+				 "%s %d;", opcode_tostr(op), ax);
+		inst += 1;
+	} break;
+	case op_ldw: {
+		int8_t a = (int8_t)inst->iABC.a;
+		inst += 1;
+		int64_t b = *((int64_t *)inst);
+		snprintf(buff, sizeof(buff),
+				 "%s %d, %ld;", opcode_tostr(op), a, b);
+		inst += 2;
+	} break;
+	case op_ldf: {
+		int8_t a = (int8_t)inst->iABC.a;
+		inst += 1;
+		double b = *((double *)inst);
+		snprintf(buff, sizeof(buff),
+				 "%s %d, %g;", opcode_tostr(op), a, b);
+		inst += 2;
+	} break;
+	case op_lfp:
+	case op_lsp:
+	case op_lip:
+	case op_call:
+	case op_preg:
+	case op_puts: {
+		int8_t a = (int8_t)inst->iABC.a;
+		snprintf(buff, sizeof(buff), "%s %d;", opcode_tostr(op), a);
+		inst += 1;
+	} break;
+	case op_mov: {
+		int8_t a = (int8_t)inst->iABC.a;
+		int8_t b = (int8_t)inst->iABC.b;
+		snprintf(buff, sizeof(buff), "%s %d, %d;",
+				 opcode_tostr(op), a, b);
+		inst += 1;
+	} break;
+	case op_fetch:
+	case op_store:
+	case op_fetchb:
+	case op_storeb:
+	case op_inc:
+	case op_dec:
+	case op_addp:
+	case op_subp:
+	case op_and:
+	case op_or:
+	case op_xor:
+	case op_shl:
+	case op_shr:
+	case op_addi:
+	case op_subi:
+	case op_muli:
+	case op_divi:
+	case op_mod:
+	case op_addf:
+	case op_subf:
+	case op_mulf:
+	case op_divf:
+	case op_eq: {
+		int8_t a = (int8_t)inst->iABC.a;
+		int8_t b = (int8_t)inst->iABC.b;
+		int8_t c = (int8_t)inst->iABC.c;
+		snprintf(buff, sizeof(buff),
+				 "%s %d, %d, %d;", opcode_tostr(op), a, b, c);
+		inst += 1;
+	} break;
+	case op_ldi:
+	case op_jez:
+	case op_jnz:
+	case op_jlz:
+	case op_jlez:
+	case op_jgz:
+	case op_jgez: {
+		int8_t a = (int8_t)inst->iABx.a;
+		int16_t bx = (int16_t)inst->iABx.bx;
+		snprintf(buff, sizeof(buff),
+				 "%s %d, %d;", opcode_tostr(op), a, bx);
+		inst += 1;
+	} break;
+	case op_call0: {
+		inst++;
+		void *p = *((void **)inst);
+		snprintf(buff, sizeof(buff),
+				 "%s %p;", opcode_tostr(op), p);
+		inst += 2;
+	} break;
+	case OP_COUNT:
+	default: assert(!"Invalid instruction");
+	}
+	if (next_inst) *next_inst = inst;
+	return buff;
+}
+
+char *
 trapcode_tostr(enum trapcode code)
 {
 	switch (code) {
-	case TRAP_OK: return "OK";
-	case TRAP_STACKOVERFLOW: return "STACKOVERFLOW";
-	case TRAP_STACKUNDERFLOW: return "STACKUNDERFLOW";
-	case TRAP_INVALIDOPCODE: return "INVALIDOPCODE";
+	case TRAP_OK:				return "OK";
+	case TRAP_STACKOVERFLOW:	return "STACKOVERFLOW";
+	case TRAP_STACKUNDERFLOW:	return "STACKUNDERFLOW";
+	case TRAP_INVALIDOPCODE:	return "INVALIDOPCODE";
+	case TRAP_USERINTERUPT:		return "USERINTERUPT";
 	default: assert(!"invalid trap code");
 	}
 	return NULL;
@@ -201,52 +325,56 @@ char *
 opcode_tostr(enum opcode op)
 {
 	switch (op) {
-	case op_nop: return "nop";
-	case op_halt: return "halt";
-	case op_ldi: return "ldi";
-	case op_ldw: return "ldw";
-	case op_ldf: return "ldf";
-	case op_lfp: return "lfp";
-	case op_lsp: return "lsp";
-	case op_lip: return "lip";
+	case op_nop:	return "nop";
+	case op_break:	return "break";
+	case op_halt:	return "halt";
+	case op_ldi:	return "ldi";
+	case op_ldw:	return "ldw";
+	case op_ldf:	return "ldf";
+	case op_lfp:	return "lfp";
+	case op_lsp:	return "lsp";
+	case op_lip:	return "lip";
 	case op_alloca: return "alloca";
 	case op_malloc: return "malloc";
-	case op_enter: return "enter";
-	case op_leave: return "leave";
-	case op_mov: return "mov";
-	case op_fetch: return "fetch";
-	case op_store: return "store";
+	case op_enter:	return "enter";
+	case op_leave:	return "leave";
+	case op_mov:	return "mov";
+	case op_fetch:	return "fetch";
+	case op_store:	return "store";
 	case op_fetchb: return "fetchb";
 	case op_storeb: return "storeb";
-	case op_puts: return "puts";
-	case op_addp: return "addp";
-	case op_subp: return "subp";
-	case op_and: return "and";
-	case op_or: return "or";
-	case op_xor: return "xor";
-	case op_shl: return "shl";
-	case op_shr: return "shr";
-	case op_addi: return "addi";
-	case op_subi: return "subi";
-	case op_muli: return "muli";
-	case op_divi: return "divi";
-	case op_mod: return "mod";
-	case op_addf: return "addf";
-	case op_subf: return "subf";
-	case op_mulf: return "mulf";
-	case op_divf: return "divf";
-	case op_eq: return "eq";
-	case op_jmp: return "jmp";
-	case op_jez: return "jez";
-	case op_jnz: return "jnz";
-	case op_jlz: return "jlz";
-	case op_jlez: return "jlez";
-	case op_jgz: return "jgz";
-	case op_jgez: return "jgez";
-	case op_call: return "call";
-	case op_call0: return "call0";
-	case op_ret: return "ret";
-	case OP_COUNT: return "OP_COUNT";
+	case op_puts:	return "puts";
+	case op_preg:	return "preg";
+	case op_addp:	return "addp";
+	case op_subp:	return "subp";
+	case op_and:	return "and";
+	case op_or:		return "or";
+	case op_xor:	return "xor";
+	case op_shl:	return "shl";
+	case op_shr:	return "shr";
+	case op_inc:	return "inc";
+	case op_dec:	return "dec";
+	case op_addi:	return "addi";
+	case op_subi:	return "subi";
+	case op_muli:	return "muli";
+	case op_divi:	return "divi";
+	case op_mod:	return "mod";
+	case op_addf:	return "addf";
+	case op_subf:	return "subf";
+	case op_mulf:	return "mulf";
+	case op_divf:	return "divf";
+	case op_eq:		return "eq";
+	case op_jmp:	return "jmp";
+	case op_jez:	return "jez";
+	case op_jnz:	return "jnz";
+	case op_jlz:	return "jlz";
+	case op_jlez:	return "jlez";
+	case op_jgz:	return "jgz";
+	case op_jgez:	return "jgez";
+	case op_call:	return "call";
+	case op_call0:	return "call0";
+	case op_ret:	return "ret";
+	case OP_COUNT:	return "OP_COUNT";
 	default: assert(!"Invalid opcode");
 	}
 	return NULL;
@@ -255,26 +383,72 @@ opcode_tostr(enum opcode op)
 void
 vm_init(Vm *vm)
 {
-	vm->stack = GC_MALLOC(sizeof(vm->stack[0]) * STACK_SZ);
-	vm->exe = GC_MALLOC(sizeof(vm->exe[0]) * PRG_SZ);
-	vm->fp = vm->stack;
-	vm->sp = vm->stack;
-	vm->ip = vm->exe;
-	vm->data = 0;
+	vm->stack		= GC_MALLOC(sizeof(vm->stack[0]) * STACK_SZ);
+	vm->exe			= GC_MALLOC(sizeof(vm->exe[0]) * PRG_SZ);
+	vm->fp			= vm->stack;
+	vm->sp			= vm->stack;
+	vm->ip			= vm->exe;
+	vm->exe_end		= vm->exe;
+	vm->data		= 0;
+	vm->deftbl		= make_labeltbl();
+	vm->restbl		= make_labeltbl();
+	vm->constants	= make_labeltbl();
+	vm->tokstk		= make_token_stack();
 }
 
 int
-vm_run(Vm *vm)
+vm_debug(Vm *vm)
+{
+	static char buff[255];
+	void *addr;
+	char *in;
+	StrView sv;
+	for (;;) {
+		addr = vm->ip;
+		in = instruction_tostr(addr, NULL);
+		printf("%p: %s\n: ", addr, in);
+		in = fgets(buff, sizeof(buff), stdin);
+		if (in == NULL) {
+			VM_TRAP(vm, TRAP_USERINTERUPT);
+		}
+		sv = sv_strip_ws(sv_from_cstr(in));
+		if (sv.len == 0) continue;
+		if (sv_eq_cstr(sv, "q")) {
+			VM_TRAP(vm, TRAP_USERINTERUPT);
+		} else if (sv_eq_cstr(sv, "n")) {
+			break;
+		} else if (sv_eq_cstr(sv, "c")) {
+			return 0;
+		} else if (sv_eq_cstr(sv, "list")) {
+			disassemble(vm);
+		} else if (sv_eq_cstr(sv, "sd")) {
+			vm_dump_stack(vm);
+		} else {
+			printf("Unrecognized command.\n");
+		}
+	}
+	return 1;
+}
+
+int
+vm_run(Vm *vm, int step_debug)
 {
 	if (setjmp(vm->trp)) {
 		vm_dump_stack(vm);
 		return -1;
 	}
 	for (;;) {
+		assert(vm->ip < vm->exe_end);
+		if (step_debug) {
+			step_debug = vm_debug(vm);
+		}
 		INST inst = *vm->ip++;
 		enum opcode oc = inst.iABC.i;
 		switch (oc) {
 		case op_nop: break;
+		case op_break: {
+			step_debug = 1;
+		} break;
 		case op_halt: {
 			int32_t ax = inst.as_i32 >> 8;
 			vm_dump_stack(vm);
@@ -374,6 +548,10 @@ vm_run(Vm *vm)
 			int8_t a = (int8_t)inst.iABC.a;
 			puts(vm->fp[a].as_ptr);
 		} break;
+		case op_preg: {
+			int8_t a = (int8_t)inst.iABC.a;
+			printf("%ld\n", vm->fp[a].as_i64);
+		} break;
 		case op_addp: {
 			/* iABC fp[A] := (WORD *)fp[B] + fp[C] */
 			int8_t a = (int8_t)inst.iABC.a;
@@ -418,6 +596,18 @@ vm_run(Vm *vm)
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
 			vm->fp[a].as_u64 = vm->fp[b].as_u64 >> vm->fp[c].as_u64;
+		} break;
+		case op_inc: {
+			int8_t a = (int8_t)inst.iABC.a;
+			int8_t b = (int8_t)inst.iABC.b;
+			int8_t c = (int8_t)inst.iABC.c;
+			vm->fp[a].as_i64 = vm->fp[b].as_i64 + c;
+		} break;
+		case op_dec: {
+			int8_t a = (int8_t)inst.iABC.a;
+			int8_t b = (int8_t)inst.iABC.b;
+			int8_t c = (int8_t)inst.iABC.c;
+			vm->fp[a].as_i64 = vm->fp[b].as_i64 - c;
 		} break;
 		case op_addi: {
 			int8_t a = (int8_t)inst.iABC.a;
@@ -579,7 +769,7 @@ populate_token_stack(TokenStack *stk, StrView sv)
 	StrView token;
 	while (sv.len) {
 		token = sv_next_token(sv, &sv);
-		if (sv.len == 0) break;
+		if (token.len == 0) break;
 		if (sv_eq_cstr(token, "\"")) {
 			push_token(stk, token);
 			token.len = 0;
@@ -632,22 +822,22 @@ make_labeltbl(void)
 }
 
 void
-push_label(LabelTbl *tbl, StrView name, uintptr_t addr)
+push_label(LabelTbl *tbl, StrView name, uint64_t value)
 {
 	assert(tbl->len < LABELTBL_SZ);
-	tbl->entries[tbl->len].addr = addr;
+	tbl->entries[tbl->len].value = value;
 	tbl->entries[tbl->len++].name = name;
 }
 
-uintptr_t
-lookup_label(LabelTbl *tbl, StrView name)
+int
+lookup_label(LabelTbl *tbl, StrView name, uint64_t *ret)
 {
 	for (size_t i = 0; i < tbl->len; ++i) {
 		if (sv_eq(name, tbl->entries[i].name)) {
-			return tbl->entries[i].addr;
+			*ret = tbl->entries[i].value;
+			return 1;
 		}
 	}
-	assert(!"label undefined");
 	return 0;
 }
 
@@ -671,8 +861,18 @@ sv_from_cstr(char *str)
 	};
 }
 
+char *
+sv_to_cstr(StrView sv)
+{
+	static char buff[255];
+	assert(sv.len < sizeof(buff) - 1);
+	memcpy(buff, sv.str, sv.len);
+	buff[sv.len] = '\0';
+	return buff;
+}
+
 StrView
-sv_map_file(char *filepath)
+sv_slurp_file(char *filepath)
 {
 	StrView sv = {0};
 	int fd = open(filepath, O_RDONLY, 0);
@@ -680,8 +880,9 @@ sv_map_file(char *filepath)
 	struct stat sb = {0};
 	if (fstat(fd, &sb) < 0) goto err1;
 	sv.len = sb.st_size;
-	sv.str = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-	if (sv.str == MAP_FAILED) goto err1;
+	sv.str = GC_MALLOC(sv.len);
+	read(fd, sv.str, sv.len);
+	close(fd);
 	return sv;
 err1:
 	close(fd);
@@ -817,6 +1018,16 @@ sv_trim_ws(StrView sv)
 	return sv;
 }
 
+StrView
+sv_strip_ws(StrView sv)
+{
+	sv = sv_trim_ws(sv);
+	while (sv.len && isspace(sv.str[sv.len - 1])) {
+		sv.len--;
+	}
+	return sv;
+}
+
 int
 try_parse_char(int ch, StrView sv, StrView *ret)
 {
@@ -847,62 +1058,123 @@ try_parse_str(char *cstr, StrView sv, StrView *ret)
 	return 0;
 }
 
-static size_t
-push_inst(INST *prg, size_t idx, INST inst)
+int
+try_parse_float(TokenStack *tokstk, double *ret)
 {
-	assert(idx < PRG_SZ);
-	prg[idx++] = inst;
-	return idx;
+	StrView token = pop_token(tokstk);
+	if (sv_eq_cstr(token, "-")) {
+		if (sv_to_f64(peek_token(tokstk), ret)) {
+			pop_token(tokstk);
+			*ret = -*ret;
+			return 1;
+		} else {
+			push_token(tokstk, token);
+			return 0;
+		}
+	} else if (sv_to_f64(token, ret)) {
+		return 1;
+	} else {
+		push_token(tokstk, token);
+		return 0;
+	}
+
+}
+
+int
+try_parse_int(TokenStack *tokstk, int64_t *ret)
+{
+	StrView token = pop_token(tokstk);
+	if (sv_eq_cstr(token, "-")) {
+		if (sv_to_int(peek_token(tokstk), ret)) {
+			pop_token(tokstk);
+			*ret = -*ret;
+			return 1;
+		} else {
+			push_token(tokstk, token);
+			return 0;
+		}
+	} else if (sv_to_int(token, ret)) {
+		return 1;
+	} else {
+		push_token(tokstk, token);
+		return 0;
+	}
+
+}
+
+static void
+push_inst(Vm *vm, INST inst)
+{
+	assert(vm->exe_end < vm->exe + PRG_SZ);
+	*vm->exe_end++ = inst;
 }
 
 #define PARSE_COMMA()							\
 	do {										\
-		token = pop_token(tokstk);				\
+		token = pop_token(vm->tokstk);			\
 		assert(sv_eq_cstr(token, ","));			\
 	} while (0)
 
 #define PARSE_ABC(op)													\
 	do {																\
-		token = pop_token(tokstk);										\
-		assert(sv_to_int(token, &a));									\
+		if (!try_parse_int(vm->tokstk, &a)) {							\
+			assert(lookup_label(vm->constants, token, &w.as_u64));		\
+			a = w.as_i64;												\
+		}																\
 		assert(a >= INT8_MIN && a <= INT8_MAX);							\
 		PARSE_COMMA();													\
-		token = pop_token(tokstk);										\
-		assert(sv_to_int(token, &b));									\
+		if (!try_parse_int(vm->tokstk, &b)) {							\
+			assert(lookup_label(vm->constants, token, &w.as_u64));		\
+			b = w.as_i64;												\
+		}																\
 		assert(b >= INT8_MIN && b <= INT8_MAX);							\
 		PARSE_COMMA();													\
-		token = pop_token(tokstk);										\
-		assert(sv_to_int(token, &c));									\
+		if (!try_parse_int(vm->tokstk, &c)) {							\
+			assert(lookup_label(vm->constants, token, &w.as_u64));		\
+			c = w.as_i64;												\
+		}																\
 		assert(c >= INT8_MIN && c <= INT8_MAX);							\
-		idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = (op), .a = a, .b = b, .c = c}}); \
+		push_inst(vm, (INST){.iABC = {.i = (op), .a = a, .b = b, .c = c}}); \
 	} while (0)
 
 #define PARSE_ABx(op)													\
 	do {																\
-		token = pop_token(tokstk);										\
-		assert(sv_to_int(token, &a));									\
+		if (!try_parse_int(vm->tokstk, &a)) {							\
+			assert(lookup_label(vm->constants, token, &w.as_u64));		\
+			a = w.as_i64;												\
+		}																\
 		assert(a >= INT8_MIN && a <= INT8_MAX);							\
 		PARSE_COMMA();													\
-		token = pop_token(tokstk);										\
-		if (sv_to_int(token, &b)) {										\
+		if (try_parse_int(vm->tokstk, &b)) {							\
 			assert(b >= INT16_MIN && b <= INT16_MAX);					\
 		} else {														\
-			push_label(restbl, token, (uintptr_t)(&vm->exe[idx]));		\
-			b = 0;														\
+			token = pop_token(vm->tokstk);								\
+			if (lookup_label(vm->constants, token, &w.as_u64)) {		\
+				b = w.as_i64;											\
+			} else {													\
+				push_label(vm->restbl, token, (uintptr_t)(vm->exe_end)); \
+				b = 0;													\
+			}															\
 		}																\
-		idx = push_inst(vm->exe, idx, (INST){.iABx = {.i = (op), .a = a, .bx = b}}); \
+		assert(b >= INT16_MIN && b <= INT16_MAX);						\
+		push_inst(vm, (INST){.iABx = {.i = (op), .a = a, .bx = b}});	\
 	} while (0)
 
 #define PARSE_Ax(op)													\
 	do {																\
-		token = pop_token(tokstk);										\
-		if (sv_to_int(token, &a)) {										\
+		if (try_parse_int(vm->tokstk, &a)) {							\
 			assert(a >= INT24_MIN && a <= INT24_MAX);					\
 		} else {														\
-			push_label(restbl, token, (uintptr_t)(&vm->exe[idx]));		\
-			a = 0;														\
+			token = pop_token(vm->tokstk);								\
+			if (lookup_label(vm->constants, token, &w.as_u64)) {		\
+				a = w.as_i64;											\
+			} else {													\
+				push_label(vm->restbl, token, (uintptr_t)(vm->exe_end)); \
+				a = 0;													\
+			}															\
+			assert(a >= INT24_MIN && a <= INT24_MAX);					\
 		}																\
-		idx = push_inst(vm->exe, idx, (INST)INST_iAx((op), a));			\
+		push_inst(vm, (INST)INST_iAx((op), a));							\
 	} while (0)
 
 void
@@ -913,8 +1185,8 @@ resolve_labels(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl)
 	INST *inst = 0;
 	for (size_t i = 0; i < restbl->len; ++i) {
 		name = restbl->entries[i].name;
-		addr1 = restbl->entries[i].addr;
-		addr2 = lookup_label(deftbl, name);
+		addr1 = restbl->entries[i].value;
+		assert(lookup_label(deftbl, name, &addr2) && "Error label undefined");
 		inst = (INST *)addr1;
 		if (inst == NULL) {
 			vm->ip = (INST *)addr2;
@@ -939,7 +1211,51 @@ resolve_labels(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl)
 }
 
 int
-assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenStack *tokstk)
+invoke_macro(Vm *vm)
+{
+	StrView token = pop_token(vm->tokstk);
+	WORD w;
+	if (sv_eq_cstr(token, "const")) {
+		token = pop_token(vm->tokstk);
+		assert(sv_eq_cstr(pop_token(vm->tokstk), "="));
+		if (try_parse_int(vm->tokstk, &w.as_i64)) {
+			push_label(vm->constants, token, w.as_u64);
+			sv_eq_cstr(pop_token(vm->tokstk), ";");
+			return 1;
+		} else if (try_parse_float(vm->tokstk, &w.as_f64)) {
+			push_label(vm->constants, token, w.as_u64);
+			sv_eq_cstr(pop_token(vm->tokstk), ";");
+			return 1;
+		} else {
+			token = pop_token(vm->tokstk);
+			if (lookup_label(vm->constants, token, &w.as_u64)) {
+				push_label(vm->constants, token, w.as_u64);
+				sv_eq_cstr(pop_token(vm->tokstk), ";");
+				return 1;
+			} else {
+				assert(!"Invalid constant value");
+			}
+		}
+	} else if (sv_eq_cstr(token, "include")) {
+		assert(sv_eq_cstr(pop_token(vm->tokstk), "\""));
+		token = pop_token(vm->tokstk);
+		StrView sv_asm = sv_slurp_file(sv_to_cstr(token));
+		TokenStack *ts = vm->tokstk;
+		vm->tokstk = make_token_stack();
+		populate_token_stack(vm->tokstk, sv_asm);
+		assemble(vm);
+		vm->tokstk = ts;
+		assert(sv_eq_cstr(pop_token(vm->tokstk), "\""));
+		sv_eq_cstr(pop_token(vm->tokstk), ";");
+		return 1;
+	} else {
+		assert(!"Undefined macro");
+	}
+	return 0;
+}
+
+int
+assemble_data_section(Vm *vm)
 {
 	/* defining data:
 	 * db *bytes*
@@ -947,165 +1263,199 @@ assemble_data_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenStack *to
 	 * dw *words*
 	 * pad *padding bytes*
 	 */
+	WORD w;
 	int64_t word;
 	double flt;
 	StrView token;
-	UNUSED(restbl);
-	while (tokstk->len > 0) {
-		token = pop_token(tokstk);
-		if (sv_eq_cstr(token, "segment")) {
+	while (vm->tokstk->len > 0) {
+		token = pop_token(vm->tokstk);
+		if (sv_eq_cstr(token, "section")) {
 			return 1;
+		} else if (sv_eq_cstr(token, "!")) {
+			assert(!"Unimplemented");
 		} else if (sv_eq_cstr(token, "db")) {
 			for (;;) {
-				token = pop_token(tokstk);
+				token = pop_token(vm->tokstk);
 				if (sv_eq_cstr(token, "rep")) {
-					assert(sv_to_int(pop_token(tokstk), &word));
+					assert(try_parse_int(vm->tokstk, &word));
 					vm->data_end += (uint64_t)word;
 					break;
-				} if (sv_eq_cstr(token, "\"")) {
-					token = pop_token(tokstk);
+				} else if (sv_eq_cstr(token, "\"")) {
+					token = pop_token(vm->tokstk);
 					while (token.len) {
 						*vm->data_end++ = *token.str++;
 						token.len--;
 					}
-					assert(sv_eq_cstr(pop_token(tokstk), "\""));
+					assert(sv_eq_cstr(pop_token(vm->tokstk), "\""));
+				} else if (lookup_label(vm->constants, token, &w.as_u64)) {
+					assert(w.as_i64 >= INT8_MIN && w.as_i64 <= INT8_MAX);
+					*vm->data_end++ = word;
 				} else {
-					assert(sv_to_int(token, &word));
+					push_token(vm->tokstk, token);
+					assert(try_parse_int(vm->tokstk, &word));
 					assert(word >= INT8_MIN && word <= INT8_MAX);
 					*vm->data_end++ = word;
 				}
-				if (!sv_eq_cstr(peek_token(tokstk), ",")) {
+				if (!sv_eq_cstr(peek_token(vm->tokstk), ",")) {
 					break;
 				} else {
-					pop_token(tokstk);
+					pop_token(vm->tokstk);
 				}
 			}
 		} else if (sv_eq_cstr(token, "df")) {
 			for (;;) {
-				token = pop_token(tokstk);
+				token = pop_token(vm->tokstk);
 				if (sv_eq_cstr(token, "rep")) {
-					assert(sv_to_int(pop_token(tokstk), &word));
+					assert(try_parse_int(vm->tokstk, &word));
 					vm->data_end += (sizeof(WORD) * (uint64_t)word);
 					break;
+				} else if (lookup_label(vm->constants, token, &w.as_u64)) {
+					*((double *)vm->data_end) = w.as_f64;
+					vm->data_end += sizeof(WORD);
 				} else {
-					assert(sv_to_f64(token, &flt));
+					push_token(vm->tokstk, token);
+					assert(try_parse_float(vm->tokstk, &flt));
 					*((double *)vm->data_end) = flt;
 					vm->data_end += sizeof(WORD);
 				}
-				if (!sv_eq_cstr(peek_token(tokstk), ",")) {
+				if (!sv_eq_cstr(peek_token(vm->tokstk), ",")) {
 					break;
 				} else {
-					pop_token(tokstk);
+					pop_token(vm->tokstk);
 				}
 			}
 		} else if (sv_eq_cstr(token, "dw")) {
 			for (;;) {
-				token = pop_token(tokstk);
+				token = pop_token(vm->tokstk);
 				if (sv_eq_cstr(token, "rep")) {
-					assert(sv_to_int(pop_token(tokstk), &word));
+					assert(try_parse_int(vm->tokstk, &word));
 					vm->data_end += (sizeof(WORD) * (uint64_t)word);
 					break;
+				} else if (lookup_label(vm->constants, token, &w.as_u64)) {
+					*((int64_t *)vm->data_end) = w.as_i64;
+					vm->data_end += sizeof(WORD);
 				} else {
-					assert(sv_to_int(token, &word));
+					push_token(vm->tokstk, token);
+					assert(try_parse_int(vm->tokstk, &word));
 					*((int64_t *)vm->data_end) = word;
 					vm->data_end += sizeof(WORD);
 				}
-				if (!sv_eq_cstr(peek_token(tokstk), ",")) {
+				if (!sv_eq_cstr(peek_token(vm->tokstk), ",")) {
 					break;
 				} else {
-					pop_token(tokstk);
+					pop_token(vm->tokstk);
 				}
 			}
+		} else if (sv_eq_cstr(token, "!")) {
+			invoke_macro(vm);
 		} else {
-			push_label(deftbl, token, (uintptr_t)(vm->data_end));
-			assert(sv_eq_cstr(pop_token(tokstk), ":"));
+			push_label(vm->deftbl, token, (uintptr_t)(vm->data_end));
+			assert(sv_eq_cstr(pop_token(vm->tokstk), ":"));
 			continue;
 		}
-		assert(sv_eq_cstr(pop_token(tokstk), ";"));
+		assert(sv_eq_cstr(pop_token(vm->tokstk), ";"));
 	}
 	return 0;
 }
 
 int
-assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenStack *tokstk)
+assemble_executable_section(Vm *vm)
 {
 	int64_t a, b, c;
 	WORD w;
-	size_t idx = 0;
 	StrView token;
-	while (tokstk->len > 0) {
-		token = pop_token(tokstk);
+	while (vm->tokstk->len > 0) {
+		token = pop_token(vm->tokstk);
 		int i = 0;
 		for (; i < OP_COUNT; ++i) {
 			if (sv_eq(token, sv_from_cstr(opcode_tostr(i)))) {
 				switch ((enum opcode)i) {
-				case op_nop: {
-					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i}});
+				case op_nop:
+				case op_break: {
+					push_inst(vm, (INST){.iABC = {.i = i}});
 				} break;
 				case op_halt:
-				case op_ldi:
 				case op_alloca:
 				case op_malloc:
 				case op_jmp: {
 					PARSE_Ax(i);
 				} break;
 				case op_ldw: {
-					token = pop_token(tokstk);
-					assert(sv_to_int(token, &a));
+					if (!try_parse_int(vm->tokstk, &a)) {
+						assert(lookup_label(vm->constants, token, &w.as_u64));
+						a = w.as_i64;
+					}
 					assert(a >= INT8_MIN && a <= INT8_MAX);
 					PARSE_COMMA();
-					token = pop_token(tokstk);
-					if (sv_to_int(token, &c)) {
-						w = (WORD){.as_i64 = c};
-						idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = op_ldw, .a = a}});
-						idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[0]});
-						idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[1]});
+					if (try_parse_int(vm->tokstk, &w.as_i64)) {
+						push_inst(vm, (INST){.iABC = {.i = i, .a = a}});
+						push_inst(vm, (INST){.as_i32 = w.as_pair[0]});
+						push_inst(vm, (INST){.as_i32 = w.as_pair[1]});
 					} else {
-						push_label(restbl, token, (uintptr_t)(&vm->exe[idx]));
-						idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a}});
-						idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
-						idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
+						token = pop_token(vm->tokstk);
+						if (lookup_label(vm->constants, token, &w.as_u64)) {
+							push_inst(vm, (INST){.iABC = {.i = i, .a = a}});
+							push_inst(vm, (INST){.as_i32 = w.as_pair[0]});
+							push_inst(vm, (INST){.as_i32 = w.as_pair[1]});
+						} else {
+							push_label(vm->restbl, token, (uintptr_t)(vm->exe_end));
+							push_inst(vm, (INST){.iABC = {.i = i, .a = a}});
+							push_inst(vm, (INST){.as_i32 = 0});
+							push_inst(vm, (INST){.as_i32 = 0});
+						}
 					}
 				} break;
 				case op_ldf: {
-					token = pop_token(tokstk);
-					assert(sv_to_int(token, &a));
+					if (!try_parse_int(vm->tokstk, &a)) {
+						assert(lookup_label(vm->constants, token, &w.as_u64));
+						a = w.as_i64;
+					}
 					assert(a >= INT8_MIN && a <= INT8_MAX);
 					PARSE_COMMA();
-					token = pop_token(tokstk);
-					assert(sv_to_f64(token, &w.as_f64));
-					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a}});
-					idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[0]});
-					idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[1]});
+					if (!try_parse_float(vm->tokstk, &w.as_f64)) {
+						assert(lookup_label(vm->constants, token, &w.as_u64));
+					}
+					push_inst(vm, (INST){.iABC = {.i = i, .a = a}});
+					push_inst(vm, (INST){.as_i32 = w.as_pair[0]});
+					push_inst(vm, (INST){.as_i32 = w.as_pair[1]});
 				} break;
 				case op_lfp:
 				case op_lsp:
 				case op_lip:
 				case op_call:
+				case op_preg:
 				case op_puts: {
-					token = pop_token(tokstk);
-					assert(sv_to_int(token, &a));
+					if (!try_parse_int(vm->tokstk, &a)) {
+						assert(lookup_label(vm->constants, token, &w.as_u64));
+						a = w.as_i64;
+					}
 					assert(a >= INT8_MIN && a <= INT8_MAX);
-					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a}});
+					push_inst(vm, (INST){.iABC = {.i = i, .a = a}});
 				} break;
 				case op_enter:
 				case op_leave: {
-					idx = push_inst(vm->exe, idx, (INST)INST_iAx(i, 0));
+					push_inst(vm, (INST)INST_iAx(i, 0));
 				} break;
 				case op_mov: {
-					token = pop_token(tokstk);
-					assert(sv_to_int(token, &a));
+					if (!try_parse_int(vm->tokstk, &a)) {
+						assert(lookup_label(vm->constants, token, &w.as_u64));
+						a = w.as_i64;
+					}
 					assert(a >= INT8_MIN && a <= INT8_MAX);
 					PARSE_COMMA();
-					token = pop_token(tokstk);
-					assert(sv_to_int(token, &b));
+					if (!try_parse_int(vm->tokstk, &b)) {
+						assert(lookup_label(vm->constants, token, &w.as_u64));
+						b = w.as_i64;
+					}
 					assert(b >= INT8_MIN && b <= INT8_MAX);
-					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i, .a = a, .b = b}});
+					push_inst(vm, (INST){.iABC = {.i = i, .a = a, .b = b}});
 				} break;
 				case op_fetch:
 				case op_store:
 				case op_fetchb:
 				case op_storeb:
+				case op_inc:
+				case op_dec:
 				case op_addp:
 				case op_subp:
 				case op_and:
@@ -1125,6 +1475,7 @@ assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenSta
 				case op_eq: {
 					PARSE_ABC(i);
 				} break;
+				case op_ldi:
 				case op_jez:
 				case op_jnz:
 				case op_jlz:
@@ -1134,21 +1485,27 @@ assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenSta
 					PARSE_ABx(i);
 				} break;
 				case op_call0: {
-					token = pop_token(tokstk);
-					if (sv_to_int(token, &c)) {
+					if (try_parse_int(vm->tokstk, &c)) {
 						w = (WORD){.as_i64 = c};
-						idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i}});
-						idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[0]});
-						idx = push_inst(vm->exe, idx, (INST){.as_i32 = w.as_pair[1]});
+						push_inst(vm, (INST){.iABC = {.i = i}});
+						push_inst(vm, (INST){.as_i32 = w.as_pair[0]});
+						push_inst(vm, (INST){.as_i32 = w.as_pair[1]});
 					} else {
-						push_label(restbl, token, (uintptr_t)(&vm->exe[idx]));
-						idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i}});
-						idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
-						idx = push_inst(vm->exe, idx, (INST){.as_i32 = 0});
+						token = pop_token(vm->tokstk);
+						if (lookup_label(vm->constants, token, &w.as_u64)) {
+							push_inst(vm, (INST){.iABC = {.i = i}});
+							push_inst(vm, (INST){.as_i32 = w.as_pair[0]});
+							push_inst(vm, (INST){.as_i32 = w.as_pair[1]});
+						} else {
+							push_label(vm->restbl, token, (uintptr_t)(vm->exe_end));
+							push_inst(vm, (INST){.iABC = {.i = i}});
+							push_inst(vm, (INST){.as_i32 = 0});
+							push_inst(vm, (INST){.as_i32 = 0});
+						}
 					}
 				} break;
 				case op_ret: {
-					idx = push_inst(vm->exe, idx, (INST){.iABC = {.i = i}});
+					push_inst(vm, (INST){.iABC = {.i = i}});
 				} break;
 				case OP_COUNT:
 				default: assert(!"Invalid instruction");
@@ -1157,55 +1514,61 @@ assemble_executable_segment(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenSta
 			}
 		}
 		if (i == OP_COUNT) {
-			if (sv_eq_cstr(token, "segment")) {
+			if (sv_eq_cstr(token, "!")) {
+				invoke_macro(vm);
+			} else if (sv_eq_cstr(token, "section")) {
 				return 1;
 			} else if (sv_eq_cstr(token, "entry")) {
-				token = pop_token(tokstk);
-				push_label(restbl, token, 0);
+				token = pop_token(vm->tokstk);
+				push_label(vm->restbl, token, 0);
 			} else {
-				push_label(deftbl, token, (uintptr_t)(&vm->exe[idx]));
-				printf("%.*s\n", (int)token.len, token.str);
-				assert(sv_eq_cstr(pop_token(tokstk), ":"));
+				push_label(vm->deftbl, token, (uintptr_t)(vm->exe_end));
+				assert(sv_eq_cstr(pop_token(vm->tokstk), ":"));
+				continue;
 			}
 		}
-		assert(sv_eq_cstr(pop_token(tokstk), ";"));
+		assert(sv_eq_cstr(pop_token(vm->tokstk), ";"));
 	}
 	return 0;
 }
 
 int
-assemble(Vm *vm, LabelTbl *deftbl, LabelTbl *restbl, TokenStack *tokstk)
+assemble(Vm *vm)
 {
 	int ds = 0, es = 0;
 	StrView token;
-	assert(sv_eq_cstr(pop_token(tokstk), "segment"));
-	while (tokstk->len > 0) {
-		token = pop_token(tokstk);
-		if (sv_eq_cstr(token, "executable")) {
-			assert(sv_eq_cstr(pop_token(tokstk), ":"));
-			assert(es == 0);
-			es = 1;
-			if (assemble_executable_segment(vm, deftbl, restbl, tokstk)) {
-				continue;
+	while (vm->tokstk->len > 0) {
+		token = pop_token(vm->tokstk);
+		if (sv_eq_cstr(token, "section")) {
+			token = pop_token(vm->tokstk);
+			if (sv_eq_cstr(token, "executable")) {
+				assert(sv_eq_cstr(pop_token(vm->tokstk), ":"));
+				assert(es == 0);
+				es = 1;
+				if (assemble_executable_section(vm)) {
+					continue;
+				} else {
+					break;
+				}
+			} else if (sv_eq_cstr(token, "data")) {
+				assert(sv_eq_cstr(pop_token(vm->tokstk), ":"));
+				assert(ds == 0);
+				ds = 1;
+				vm->data = GC_MALLOC(DATA_SZ);
+				vm->data_end = vm->data;
+				if (assemble_data_section(vm)) {
+					continue;
+				} else {
+					break;
+				}
 			} else {
-				break;
+				assert(!"Error Unknown section type");
 			}
-		} else if (sv_eq_cstr(token, "data")) {
-			assert(sv_eq_cstr(pop_token(tokstk), ":"));
-			assert(ds == 0);
-			ds = 1;
-			vm->data = GC_MALLOC(DATA_SZ);
-			vm->data_end = vm->data;
-			if (assemble_data_segment(vm, deftbl, restbl, tokstk)) {
-				continue;
-			} else {
-				break;
-			}
-		} else {
-			assert(!"Error Unknown segment type");
+		} else if (sv_eq_cstr(token, "!")) {
+			invoke_macro(vm);
 		}
 	}
-	resolve_labels(vm, deftbl, restbl);
+	resolve_labels(vm, vm->deftbl, vm->restbl);
 	return 0;
 }
 
@@ -1224,20 +1587,28 @@ vm_dump_stack(Vm *vm)
 	}
 }
 
+void
+disassemble(Vm *vm)
+{
+	INST *inst = vm->exe;
+	printf("address       : instruction\n");
+	while (inst < vm->exe_end) {
+		void *addr = inst;
+		char *str = instruction_tostr(inst, &inst);
+		printf("%p: %s\n", addr, str);
+	}
+}
+
 int
 main(void)
 {
 	GC_INIT();
-	printf("OP_COUNT = %d\n", OP_COUNT);
 	Vm vm = {0};
 	vm_init(&vm);
-	LabelTbl *deftbl = make_labeltbl();
-	LabelTbl *restbl = make_labeltbl();
-	StrView sv_asm = sv_map_file("test.yasm");
-	TokenStack *tokstk = make_token_stack();
-	populate_token_stack(tokstk, sv_asm);
-	assemble(&vm, deftbl, restbl, tokstk);
-	if (vm_run(&vm) < 0) {
+	StrView sv_asm = sv_slurp_file("test.yasm");
+	populate_token_stack(vm.tokstk, sv_asm);
+	assemble(&vm);
+	if (vm_run(&vm, 1) < 0) {
 		fprintf(stderr, "Error trap signalled: %s\n", trapcode_tostr(vm.status));
 	}
 	return 0;
