@@ -1,0 +1,36 @@
+!include "c.incl";
+
+# macro definition
+!macro plus_one, x {
+    inc x, x, 1;
+}
+
+section executable:
+entry main;
+gray_code:        # calculate gray code for given number
+	enter;
+	alloca 2;
+	mov 0, -3;    # move parameter into frame
+	ldi 1, 1;
+	shr 1, 0, 1;
+	xor 0, 0, 1;
+	mov -3, 0;    # move return value to caller
+	leave;
+	ret;
+main:
+	enter;
+	alloca 4;
+	ldw 0, x;     # constant defined in c.incl
+	ldw 0, y;     # constant defined in c.incl
+	ldi 0, 0;     # n
+	ldw 1, 100;   # limit
+	jmp begin;
+loop:
+	!plus_one 0; # macro invocation;
+begin:
+	mov 3, 0;
+	call0 gray_code;
+	preg 3;
+	subi 2, 1, 0;
+	jnz 2, loop;
+	halt 0;

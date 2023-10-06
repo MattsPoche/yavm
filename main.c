@@ -52,6 +52,11 @@ typedef struct _sv {
 	char *str;
 } StrView;
 
+typedef struct _svp {
+	StrView fst;
+	StrView snd;
+} StrViewPair;
+
 typedef struct _tokstk {
 	size_t len;
 	StrView entries[TOKEN_STK_SZ];
@@ -69,6 +74,11 @@ typedef struct _labeltbl {
 	Label entries[LABELTBL_SZ];
 } LabelTbl;
 
+typedef struct _macrodef {
+	TokenStack *args;
+	TokenStack *tokens;
+} MacroDef;
+
 typedef struct _vm {
 	WORD *fp;
 	WORD *sp;
@@ -84,6 +94,7 @@ typedef struct _vm {
 	LabelTbl *deftbl;
 	LabelTbl *restbl;
 	LabelTbl *constants;
+	LabelTbl *macros;
 } Vm;
 
 enum opcode {
@@ -156,6 +167,7 @@ int vm_debug(Vm *vm);
 int vm_run(Vm *vm, int step_debug);
 void vm_dump_stack(Vm *vm);
 uint64_t hash(void *buff, size_t size);
+int sv_pair_list_find_fst(StrViewPair *list, size_t len, StrView sv, StrView *ret);
 StrView sv_slurp_file(char *filepath);
 StrView sv_from_cstr(char *str);
 char *sv_to_cstr(StrView sv);
@@ -182,7 +194,9 @@ int assemble_data_section(Vm *vm);
 void disassemble(Vm *vm);
 TokenStack *make_token_stack(void);
 void push_token(TokenStack *stk, StrView token);
+TokenStack *copy_token_stack(TokenStack *stk);
 void populate_token_stack(TokenStack *stk, StrView sv);
+void reverse_token_stack(TokenStack *stk);
 StrView pop_token(TokenStack *stk);
 StrView peek_token(TokenStack *stk);
 
@@ -393,6 +407,7 @@ vm_init(Vm *vm)
 	vm->deftbl		= make_labeltbl();
 	vm->restbl		= make_labeltbl();
 	vm->constants	= make_labeltbl();
+	vm->macros  	= make_labeltbl();
 	vm->tokstk		= make_token_stack();
 }
 
@@ -763,6 +778,31 @@ push_token(TokenStack *stk, StrView token)
 	stk->entries[stk->len++] = token;
 }
 
+TokenStack *
+copy_token_stack(TokenStack *stk)
+{
+	TokenStack *new_stk = make_token_stack();
+	memcpy(new_stk->entries, stk->entries, stk->len * sizeof(*stk->entries));
+	new_stk->len = stk->len;
+	return new_stk;
+}
+
+void
+reverse_token_stack(TokenStack *stk)
+{
+	if (stk->len == 0) return;
+	StrView token;
+	size_t i = 0;
+	size_t j = stk->len - 1;
+	while (i < j) {
+		token = stk->entries[i];
+		stk->entries[i] = stk->entries[j];
+		stk->entries[j] = token;
+		i++;
+		j--;
+	}
+}
+
 void
 populate_token_stack(TokenStack *stk, StrView sv)
 {
@@ -787,15 +827,7 @@ populate_token_stack(TokenStack *stk, StrView sv)
 		}
 		push_token(stk, token);
 	}
-	size_t i = 0;
-	size_t j = stk->len - 1;
-	while (i < j) {
-		token = stk->entries[i];
-		stk->entries[i] = stk->entries[j];
-		stk->entries[j] = token;
-		i++;
-		j--;
-	}
+	reverse_token_stack(stk);
 }
 
 StrView
@@ -869,6 +901,18 @@ sv_to_cstr(StrView sv)
 	memcpy(buff, sv.str, sv.len);
 	buff[sv.len] = '\0';
 	return buff;
+}
+
+int
+sv_pair_list_find_fst(StrViewPair *list, size_t len, StrView sv, StrView *ret)
+{
+	for (size_t i = 0; i < len; ++i) {
+		if (sv_eq(list[i].fst, sv)) {
+			*ret = list[i].snd;
+			return 1;
+		}
+	}
+	return 0;
 }
 
 StrView
@@ -1215,7 +1259,24 @@ invoke_macro(Vm *vm)
 {
 	StrView token = pop_token(vm->tokstk);
 	WORD w;
-	if (sv_eq_cstr(token, "const")) {
+	if (sv_eq_cstr(token, "macro")) {
+		token = pop_token(vm->tokstk);
+		MacroDef *md = GC_MALLOC(sizeof(*md));
+		md->args = make_token_stack();
+		md->tokens = make_token_stack();
+		while (sv_eq_cstr(peek_token(vm->tokstk), ",")) {
+			pop_token(vm->tokstk);
+			push_token(md->args, pop_token(vm->tokstk));
+		}
+		reverse_token_stack(md->args);
+		assert(sv_eq_cstr(pop_token(vm->tokstk), "{"));
+		while (!sv_eq_cstr(peek_token(vm->tokstk), "}")) {
+			push_token(md->tokens, pop_token(vm->tokstk));
+		}
+		pop_token(vm->tokstk);
+		reverse_token_stack(md->tokens);
+		push_label(vm->macros, token, (uint64_t)md);
+	} else if (sv_eq_cstr(token, "const")) {
 		token = pop_token(vm->tokstk);
 		assert(sv_eq_cstr(pop_token(vm->tokstk), "="));
 		if (try_parse_int(vm->tokstk, &w.as_i64)) {
@@ -1248,6 +1309,33 @@ invoke_macro(Vm *vm)
 		assert(sv_eq_cstr(pop_token(vm->tokstk), "\""));
 		sv_eq_cstr(pop_token(vm->tokstk), ";");
 		return 1;
+	} else if (lookup_label(vm->macros, token, &w.as_u64)) {
+		static StrViewPair bindings[32];
+		MacroDef *md = w.as_ptr;
+		TokenStack *args = copy_token_stack(md->args);
+		TokenStack *tokens = copy_token_stack(md->tokens);
+		TokenStack *out_stk = make_token_stack();
+		size_t nargs = md->args->len;
+		assert(nargs < 32);
+		for (size_t i = 0; i < nargs; ++i) {
+			bindings[i].fst = pop_token(args);
+			bindings[i].snd = pop_token(vm->tokstk);
+			if (sv_eq_cstr(peek_token(vm->tokstk), ",")) {
+				pop_token(vm->tokstk);
+			} else {
+				assert((i == md->args->len - 1)
+					   && sv_eq_cstr(pop_token(vm->tokstk), ";"));
+			}
+		}
+		while (tokens->len) {
+			token = pop_token(tokens);
+			sv_pair_list_find_fst(bindings, nargs, token, &token);
+			push_token(out_stk, token);
+		}
+		while (out_stk->len) {
+			token = pop_token(out_stk);
+			push_token(vm->tokstk, token);
+		}
 	} else {
 		assert(!"Undefined macro");
 	}
@@ -1348,6 +1436,7 @@ assemble_data_section(Vm *vm)
 			}
 		} else if (sv_eq_cstr(token, "!")) {
 			invoke_macro(vm);
+			continue;
 		} else {
 			push_label(vm->deftbl, token, (uintptr_t)(vm->data_end));
 			assert(sv_eq_cstr(pop_token(vm->tokstk), ":"));
@@ -1516,6 +1605,7 @@ assemble_executable_section(Vm *vm)
 		if (i == OP_COUNT) {
 			if (sv_eq_cstr(token, "!")) {
 				invoke_macro(vm);
+				continue;
 			} else if (sv_eq_cstr(token, "section")) {
 				return 1;
 			} else if (sv_eq_cstr(token, "entry")) {
