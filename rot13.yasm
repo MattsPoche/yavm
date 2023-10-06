@@ -1,0 +1,102 @@
+!const a = 97;
+!const z = 122;
+!const A = 65;
+!const Z = 90;
+
+# After rot13
+# Gur Dhvpx Oebja Sbk Whzcf Bire Gur Ynml Qbt
+
+section data:
+msg: db "The Quick Brown Fox Jumps Over The Lazy Dog", 0;
+
+section executable:
+entry main;
+islower:
+	enter;
+	alloca 2;
+	ldi 1, a;
+	subi 0, -3, 1;
+	jgez 0, islower.next1;
+	ldi -3, 0;
+	leave;
+	ret;
+islower.next1:
+	ldi 1, z;
+	subi 0, -3, 1;
+	jlez 0, islower.next2;
+	ldi -3, 0;
+	leave;
+	ret;
+islower.next2:
+	ldi -3, 1;
+	leave;
+	ret;
+isupper:
+	enter;
+	alloca 2;
+	ldi 1, A;
+	subi 0, -3, 1;
+	jgez 0, isupper.next1;
+	ldi -3, 0;
+	leave;
+	ret;
+isupper.next1:
+	ldi 1, Z;
+	subi 0, -3, 1;
+	jlez 0, isupper.next2;
+	ldi -3, 0;
+	leave;
+	ret;
+isupper.next2:
+	ldi -3, 1;
+	leave;
+	ret;
+rot13:
+	enter;
+	alloca 2;
+	mov 0, -3;
+	mov 1, 0;
+	call0 islower;
+	jez 1, not_lower;
+	ldi 1, 13;
+	addi 0, 0, 1;
+	ldi 1, a;
+	subi 0, 0, 1;
+	ldi 1, 26;
+	mod 0, 0, 1;
+	ldi 1, a;
+	addi 0, 0, 1;
+	mov -3, 0;
+	leave;
+	ret;
+not_lower:
+	mov 1, 0;
+	call0 isupper;
+	jez 1, not_upper;
+	ldi 1, 13;
+	addi 0, 0, 1;
+	ldi 1, A;
+	subi 0, 0, 1;
+	ldi 1, 26;
+	mod 0, 0, 1;
+	ldi 1, A;
+	addi 0, 0, 1;
+not_upper:
+	mov -3, 0;
+	leave;
+	ret;
+main:
+	alloca 2;
+	ldw 0, msg;
+	puts 0;
+.loop:
+	fetchb 1, 0, 0;
+	jez 1, _exit;
+	call0 rot13;
+	storeb 0, 0, 1;
+	inc 0, 0, 1;
+	jmp .loop;
+_exit:
+	ldw 0, msg;
+	puts 0;
+	halt 0;

@@ -544,7 +544,7 @@ vm_run(Vm *vm, int step_debug)
 			ptr[b] = vm->fp[c];
 		} break;
 		case op_fetchb: {
-			/* iABC fp[A] := ((WORD *)fp[B])[C] */
+			/* iABC fp[A] := ((char *)fp[B])[C] */
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
@@ -552,7 +552,7 @@ vm_run(Vm *vm, int step_debug)
 			vm->fp[a].as_i64 = ptr[c];
 		} break;
 		case op_storeb: {
-			/* iABC ((WORD *)fp[A])[B] := fp[C] */
+			/* iABC ((char *)fp[A])[B] := fp[C] */
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
@@ -1359,8 +1359,6 @@ assemble_data_section(Vm *vm)
 		token = pop_token(vm->tokstk);
 		if (sv_eq_cstr(token, "section")) {
 			return 1;
-		} else if (sv_eq_cstr(token, "!")) {
-			assert(!"Unimplemented");
 		} else if (sv_eq_cstr(token, "db")) {
 			for (;;) {
 				token = pop_token(vm->tokstk);
@@ -1630,13 +1628,14 @@ assemble(Vm *vm)
 	while (vm->tokstk->len > 0) {
 		token = pop_token(vm->tokstk);
 		if (sv_eq_cstr(token, "section")) {
+		begin:
 			token = pop_token(vm->tokstk);
 			if (sv_eq_cstr(token, "executable")) {
 				assert(sv_eq_cstr(pop_token(vm->tokstk), ":"));
 				assert(es == 0);
 				es = 1;
 				if (assemble_executable_section(vm)) {
-					continue;
+					goto begin;
 				} else {
 					break;
 				}
@@ -1647,7 +1646,7 @@ assemble(Vm *vm)
 				vm->data = GC_MALLOC(DATA_SZ);
 				vm->data_end = vm->data;
 				if (assemble_data_section(vm)) {
-					continue;
+					goto begin;
 				} else {
 					break;
 				}
@@ -1695,7 +1694,7 @@ main(void)
 	GC_INIT();
 	Vm vm = {0};
 	vm_init(&vm);
-	StrView sv_asm = sv_slurp_file("test.yasm");
+	StrView sv_asm = sv_slurp_file("rot13.yasm");
 	populate_token_stack(vm.tokstk, sv_asm);
 	assemble(&vm);
 	if (vm_run(&vm, 1) < 0) {
