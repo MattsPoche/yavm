@@ -445,6 +445,21 @@ vm_debug(Vm *vm)
 	return 1;
 }
 
+static WORD *
+vm_index_frame(Vm *vm, int64_t idx)
+{
+	WORD *ptr = vm->fp + idx;
+	if (ptr < vm->stack) {
+		VM_TRAP(vm, TRAP_STACKUNDERFLOW);
+		return NULL;
+	}
+	if (ptr >= vm->sp) {
+		VM_TRAP(vm, TRAP_STACKOVERFLOW);
+		return NULL;
+	}
+	return ptr;
+}
+
 int
 vm_run(Vm *vm, int step_debug)
 {
@@ -471,29 +486,35 @@ vm_run(Vm *vm, int step_debug)
 		} break;
 		case op_ldi: {
 			int8_t a = (int8_t)inst.iABx.a;
-			vm->fp[a].as_i64 = (int16_t)inst.iABx.bx;
+			WORD *w = vm_index_frame(vm, a);
+			w->as_i64 = (int16_t)inst.iABx.bx;
 		} break;
 		case op_ldw: {
 			int8_t a = (int8_t)inst.iABC.a;
-			vm->fp[a].as_i64 = *((int64_t *)vm->ip);
+			WORD *w = vm_index_frame(vm, a);
+			w->as_i64 = *((int64_t *)vm->ip);
 			vm->ip += 2;
 		} break;
 		case op_ldf: {
 			int8_t a = (int8_t)inst.iABC.a;
-			vm->fp[a].as_f64 = *((double *)vm->ip);
+			WORD *w = vm_index_frame(vm, a);
+			w->as_f64 = *((double *)vm->ip);
 			vm->ip += 2;
 		} break;
 		case op_lfp: {
 			int8_t a = (int8_t)inst.iABC.a;
-			vm->fp[a].as_ptr = vm->fp;
+			WORD *w = vm_index_frame(vm, a);
+			w->as_ptr = vm->fp;
 		} break;
 		case op_lsp: {
 			int8_t a = (int8_t)inst.iABC.a;
-			vm->fp[a].as_ptr = vm->sp;
+			WORD *w = vm_index_frame(vm, a);
+			w->as_ptr = vm->sp;
 		} break;
 		case op_lip: {
 			int8_t a = (int8_t)inst.iABC.a;
-			vm->fp[a].as_ptr = (void *)vm->ip;
+			WORD *w = vm_index_frame(vm, a);
+			w->as_ptr = (void *)vm->ip;
 		} break;
 		case op_alloca: {
 			int64_t ax = inst.as_i32 >> 8;
@@ -508,7 +529,8 @@ vm_run(Vm *vm, int step_debug)
 		case op_malloc: {
 			int8_t a = (int8_t)inst.iABx.a;
 			uint16_t bx = inst.iABx.bx;
-			vm->fp[a].as_ptr = GC_MALLOC(bx);
+			WORD *w = vm_index_frame(vm, a);
+			w->as_ptr = GC_MALLOC(bx);
 		} break;
 		case op_enter: {
 			vm->sp[0].as_ptr = vm->fp;
@@ -525,164 +547,231 @@ vm_run(Vm *vm, int step_debug)
 		case op_mov: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
-			vm->fp[a] = vm->fp[b];
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			*wa = *wb;
 		} break;
 		case op_fetch: {
 			/* iABC fp[A] := ((WORD *)fp[B])[C] */
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			WORD *ptr = vm->fp[b].as_ptr;
-			vm->fp[a] = ptr[c];
+			WORD *w = vm_index_frame(vm, b);
+			WORD *ptr = w->as_ptr;
+			w = vm_index_frame(vm, a);
+			*w = ptr[c];
 		} break;
 		case op_store: {
 			/* iABC ((WORD *)fp[A])[B] := fp[C] */
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			WORD *ptr = vm->fp[a].as_ptr;
-			ptr[b] = vm->fp[c];
+			WORD *w = vm_index_frame(vm, a);
+			WORD *ptr = w->as_ptr;
+			w = vm_index_frame(vm, c);
+			ptr[b] = *w;
 		} break;
 		case op_fetchb: {
 			/* iABC fp[A] := ((char *)fp[B])[C] */
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			int8_t *ptr = vm->fp[b].as_ptr;
-			vm->fp[a].as_i64 = ptr[c];
+			WORD *w = vm_index_frame(vm, b);
+			int8_t *ptr = w->as_ptr;
+			w = vm_index_frame(vm, a);
+			w->as_i64 = ptr[c];
 		} break;
 		case op_storeb: {
 			/* iABC ((char *)fp[A])[B] := fp[C] */
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			int8_t *ptr = vm->fp[a].as_ptr;
-			ptr[b] = vm->fp[c].as_i64;
+			WORD *w = vm_index_frame(vm, a);
+			int8_t *ptr = w->as_ptr;
+			w = vm_index_frame(vm, c);
+			ptr[b] = w->as_i64;
 		} break;
 		case op_puts: {
 			int8_t a = (int8_t)inst.iABC.a;
-			puts(vm->fp[a].as_ptr);
+			WORD *w = vm_index_frame(vm, a);
+			puts(w->as_ptr);
 		} break;
 		case op_preg: {
 			int8_t a = (int8_t)inst.iABC.a;
-			printf("%ld\n", vm->fp[a].as_i64);
+			WORD *w = vm_index_frame(vm, a);
+			printf("%ld\n", w->as_i64);
 		} break;
 		case op_addp: {
 			/* iABC fp[A] := (WORD *)fp[B] + fp[C] */
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			WORD *ptr = vm->fp[b].as_ptr;
-			vm->fp[a].as_ptr = ptr + vm->fp[c].as_i64;
+			WORD *w = vm_index_frame(vm, b);
+			WORD *ptr = w->as_ptr;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_ptr = ptr + wc->as_i64;
 		} break;
 		case op_subp: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			WORD *ptr = vm->fp[b].as_ptr;
-			vm->fp[a].as_ptr = ptr - vm->fp[c].as_i64;
+			WORD *w = vm_index_frame(vm, b);
+			WORD *ptr = w->as_ptr;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_ptr = ptr - wc->as_i64;
 		} break;
 		case op_and: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_u64 = vm->fp[b].as_u64 & vm->fp[c].as_u64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_u64 = wb->as_u64 & wc->as_u64;
 		} break;
 		case op_or: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_u64 = vm->fp[b].as_u64 | vm->fp[c].as_u64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_u64 = wb->as_u64 | wc->as_u64;
 		} break;
 		case op_xor: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_u64 = vm->fp[b].as_u64 ^ vm->fp[c].as_u64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_u64 = wb->as_u64 ^ wc->as_u64;
 		} break;
 		case op_shl: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_u64 = vm->fp[b].as_u64 << vm->fp[c].as_u64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_u64 = wb->as_u64 << wc->as_u64;
 		} break;
 		case op_shr: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_u64 = vm->fp[b].as_u64 >> vm->fp[c].as_u64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_u64 = wb->as_u64 >> wc->as_u64;
 		} break;
 		case op_inc: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_i64 = vm->fp[b].as_i64 + c;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			wa->as_i64 = wb->as_i64 + c;
 		} break;
 		case op_dec: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_i64 = vm->fp[b].as_i64 - c;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			wa->as_i64 = wb->as_i64 - c;
 		} break;
 		case op_addi: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_i64 = vm->fp[b].as_i64 + vm->fp[c].as_i64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_i64 = wb->as_i64 + wc->as_i64;
 		} break;
 		case op_subi: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_i64 = vm->fp[b].as_i64 - vm->fp[c].as_i64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_i64 = wb->as_i64 - wc->as_i64;
 		} break;
 		case op_muli: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_i64 = vm->fp[b].as_i64 * vm->fp[c].as_i64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_i64 = wb->as_i64 * wc->as_i64;
 		} break;
 		case op_divi: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_i64 = vm->fp[b].as_i64 / vm->fp[c].as_i64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_i64 = wb->as_i64 / wc->as_i64;
 		} break;
 		case op_mod: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_i64 = vm->fp[b].as_i64 % vm->fp[c].as_i64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_i64 = wb->as_i64 % wc->as_i64;
 		} break;
 		case op_addf: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_f64 = vm->fp[b].as_f64 + vm->fp[c].as_f64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_f64 = wb->as_f64 + wc->as_f64;
 		} break;
 		case op_subf: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_f64 = vm->fp[b].as_f64 - vm->fp[c].as_f64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_f64 = wb->as_f64 - wc->as_f64;
 		} break;
 		case op_mulf: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_f64 = vm->fp[b].as_f64 * vm->fp[c].as_f64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_f64 = wb->as_f64 * wc->as_f64;
 		} break;
 		case op_divf: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_f64 = vm->fp[b].as_f64 / vm->fp[c].as_f64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_f64 = wb->as_f64 / wc->as_f64;
 		} break;
 		case op_eq: {
 			int8_t a = (int8_t)inst.iABC.a;
 			int8_t b = (int8_t)inst.iABC.b;
 			int8_t c = (int8_t)inst.iABC.c;
-			vm->fp[a].as_i64 = vm->fp[b].as_i64 == vm->fp[c].as_i64;
+			WORD *wa = vm_index_frame(vm, a);
+			WORD *wb = vm_index_frame(vm, b);
+			WORD *wc = vm_index_frame(vm, c);
+			wa->as_i64 = wb->as_i64 == wc->as_i64;
 		} break;
 		case op_jmp: {
 			int32_t ax = inst.as_i32 >> 8;
@@ -691,42 +780,48 @@ vm_run(Vm *vm, int step_debug)
 		case op_jez: {
 			int8_t a = (int8_t)inst.iABx.a;
 			int16_t bx = (int16_t)inst.iABx.bx;
-			if (vm->fp[a].as_i64 == 0) {
+			WORD *w = vm_index_frame(vm, a);
+			if (w->as_i64 == 0) {
 				vm->ip += bx;
 			}
 		} break;
 		case op_jnz: {
 			int8_t a = (int8_t)inst.iABx.a;
 			int16_t bx = (int16_t)inst.iABx.bx;
-			if (vm->fp[a].as_i64 != 0) {
+			WORD *w = vm_index_frame(vm, a);
+			if (w->as_i64 != 0) {
 				vm->ip += bx;
 			}
 		} break;
 		case op_jlz: {
 			int8_t a = (int8_t)inst.iABx.a;
 			int16_t bx = (int16_t)inst.iABx.bx;
-			if (vm->fp[a].as_i64 < 0) {
+			WORD *w = vm_index_frame(vm, a);
+			if (w->as_i64 < 0) {
 				vm->ip += bx;
 			}
 		} break;
 		case op_jlez: {
 			int8_t a = (int8_t)inst.iABx.a;
 			int16_t bx = (int16_t)inst.iABx.bx;
-			if (vm->fp[a].as_i64 <= 0) {
+			WORD *w = vm_index_frame(vm, a);
+			if (w->as_i64 <= 0) {
 				vm->ip += bx;
 			}
 		} break;
 		case op_jgz: {
 			int8_t a = (int8_t)inst.iABx.a;
 			int16_t bx = (int16_t)inst.iABx.bx;
-			if (vm->fp[a].as_i64 > 0) {
+			WORD *w = vm_index_frame(vm, a);
+			if (w->as_i64 > 0) {
 				vm->ip += bx;
 			}
 		} break;
 		case op_jgez: {
 			int8_t a = (int8_t)inst.iABx.a;
 			int16_t bx = (int16_t)inst.iABx.bx;
-			if (vm->fp[a].as_i64 >= 0) {
+			WORD *w = vm_index_frame(vm, a);
+			if (w->as_i64 >= 0) {
 				vm->ip += bx;
 			}
 		} break;
@@ -1697,7 +1792,7 @@ main(void)
 	StrView sv_asm = sv_slurp_file("rot13.yasm");
 	populate_token_stack(vm.tokstk, sv_asm);
 	assemble(&vm);
-	if (vm_run(&vm, 1) < 0) {
+	if (vm_run(&vm, 0) < 0) {
 		fprintf(stderr, "Error trap signalled: %s\n", trapcode_tostr(vm.status));
 	}
 	return 0;
