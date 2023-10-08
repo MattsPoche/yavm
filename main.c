@@ -1105,7 +1105,7 @@ eat_ws_and_comments(StrView sv)
 			sv.str++;
 			sv.len--;
 		}
-		return sv_trim_ws(sv);
+		return eat_ws_and_comments(sv);
 	}
 	return sv;
 }

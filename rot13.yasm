@@ -3,14 +3,14 @@
 !const A = 65;
 !const Z = 90;
 
-# After rot13
-# Gur Dhvpx Oebja Sbk Whzcf Bire Gur Ynml Qbt
-
 section data:
 msg: db "The Quick Brown Fox Jumps Over The Lazy Dog", 0;
+# after rot13:
+#        Gur Dhvpx Oebja Sbk Whzcf Bire Gur Ynml Qbt
 
 section executable:
 entry main;
+
 islower:
 	enter;
 	alloca 2;
@@ -31,6 +31,7 @@ islower.next2:
 	ldi -3, 1;
 	leave;
 	ret;
+	
 isupper:
 	enter;
 	alloca 2;
@@ -51,6 +52,7 @@ isupper.next2:
 	ldi -3, 1;
 	leave;
 	ret;
+
 rot13:
 	enter;
 	alloca 2;
@@ -85,6 +87,7 @@ not_upper:
 	mov -3, 0;
 	leave;
 	ret;
+
 main:
 	alloca 2;
 	ldw 0, msg;
